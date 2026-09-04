@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "id": "yingshi-gh",
+  "name": "影视库 (58175)",
+  "enabled": true,
+  "baseUrl": "https://raw.githubusercontent.com/Carolove7/javbus-juji-plugin/master",
+  "search": {
+    "method": "GET",
+    "url": "https://raw.githubusercontent.com/Carolove7/javbus-juji-plugin/master/index/yingshi/yingshi-{page}.json",
+    "responseType": "json",
+    "itemsPath": "items",
+    "totalPath": "total",
+    "pageSize": 1000
+  },
+  "fields": {
+    "sourceItemId": "i",
+    "title": "t",
+    "infoHash": "i",
+    "magnet": "m",
+    "humanSize": "s",
+    "createdAt": "d"
+  },
+  "defaults": {
+    "magnet": "magnet:?xt=urn:btih:{infoHashUpper}"
+  },
+  "_comment": "影视索引，共 58175 条 / 59 片，每片 1000 条。数据源为 GitHub raw 静态分片，JAVBUS 按 {page} 逐片拉取，翻页可用。magnet 不入库，由 defaults 用 infoHash 现场拼装。注意：静态源无服务端过滤，搜索框输入关键词不会筛选结果（只能按页浏览）；需要关键词搜索请部署仓库里的 javbus-adapter-worker.js 改用适配版插件。"
+}
