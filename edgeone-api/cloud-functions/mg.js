@@ -1,0 +1,207 @@
+// GET /mg?q=<词>&page=<n>           —— JAVBUS 搜索桥接
+// GET /mg?op=tools                  —— 调试：返回 MCP 服务器暴露的工具列表与入参 schema
+//
+// 本函数把 JAVBUS 的 GET 搜索请求，转成对 MCP 服务器 (默认 https://magnet.kiteyuan.info/mcp)
+// 的 JSON-RPC 调用，再把工具结果归一化为 JAVBUS 认识的 { items:[{i,t,s,d}], total }。
+//
+// 配置（环境变量，在 EdgeOne 项目「环境变量」中设置，切勿写入仓库 / 公开仓库）：
+//   MG_MCP_URL          默认 https://magnet.kiteyuan.info/mcp
+//   MG_MCP_TOKEN        鉴权令牌（Bearer）；缺省时返回明确错误
+//   MG_MCP_AUTH_HEADER  鉴权头名，默认 Authorization
+//   MG_MCP_TOOL         指定搜索工具名；缺省时按名称/描述自动探测（含 search/magnet/query/磁力/搜索…）
+//   MG_MCP_QUERY_PARAM  传给工具的查询参数名；缺省时按 schema 自动猜测 (q/query/keyword/name/text…)
+//   MG_MCP_PAGE_PARAM   分页参数名；缺省时按 schema 自动猜测 (page/pageNum/p/offset)；猜不到则不传
+//   PAGE_SIZE           默认 50
+//
+// 传输：MCP streamable HTTP。自动处理 SSE(text/event-stream) 与纯 JSON 两种响应，
+// 并复用 Mcp-Session-Id；会话失效(404/会话不存在)时自动重新 initialize 重试一次。
+
+const PAGE_SIZE = Math.max(1, Number(process.env.PAGE_SIZE || 50));
+const MCP_URL = process.env.MG_MCP_URL || 'https://magnet.kiteyuan.info/mcp';
+const MCP_TOKEN = process.env.MG_MCP_TOKEN || '';
+const AUTH_HEADER = process.env.MG_MCP_AUTH_HEADER || 'Authorization';
+const PROTOCOL = '2024-11-05';
+
+let sessionId = null;
+let toolsCache = null;
+let toolsCacheAt = 0;
+
+function authHeaders(extra = {}) {
+  return {
+    'Content-Type': 'application/json',
+    'Accept': 'application/json, text/event-stream',
+    [AUTH_HEADER]: `Bearer ${MCP_TOKEN}`,
+    ...extra,
+  };
+}
+
+// 解析 MCP 响应体：兼容 SSE(data: 行) 与纯 JSON
+function parseBody(ct, text) {
+  if ((ct || '').includes('text/event-stream')) {
+    const evs = [];
+    for (const line of text.split('\n')) {
+      if (line.startsWith('data:')) {
+        const d = line.slice(5).trim();
+        if (d && d !== '[DONE]') {
+          try { evs.push(JSON.parse(d)); } catch { /* ignore */ }
+        }
+      }
+    }
+    return evs[evs.length - 1] || null;
+  }
+  return text ? JSON.parse(text) : null;
+}
+
+async function rpc(method, params, id, retry = true) {
+  const res = await fetch(MCP_URL, {
+    method: 'POST',
+    headers: authHeaders(sessionId ? { 'Mcp-Session-Id': sessionId } : {}),
+    body: JSON.stringify({ jsonrpc: '2.0', id: id ?? 1, method, params: params || {} }),
+    signal: AbortSignal.timeout(30000),
+  });
+  const sid = res.headers.get('Mcp-Session-Id');
+  if (sid) sessionId = sid;
+  const ct = res.headers.get('content-type') || '';
+  const text = await res.text();
+  const data = parseBody(ct, text);
+  if (!res.ok) {
+    // 会话失效 → 重新初始化后重试一次
+    if ((res.status === 404 || /session/i.test(text || '')) && retry && sessionId) {
+      sessionId = null;
+      await ensureInitialized();
+      return rpc(method, params, id, false);
+    }
+    throw new Error(`MCP ${method} HTTP ${res.status}: ${text.slice(0, 300)}`);
+  }
+  if (data && data.error) throw new Error(`MCP ${method} error: ${JSON.stringify(data.error)}`);
+  return data ? data.result : null;
+}
+
+async function ensureInitialized() {
+  if (sessionId) return;
+  await rpc('initialize', {
+    protocolVersion: PROTOCOL,
+    capabilities: {},
+    clientInfo: { name: 'mg-bridge', version: '1.0' },
+  }, 1, false);
+  // notifications/initialized（无响应，fire-and-forget）
+  await fetch(MCP_URL, {
+    method: 'POST',
+    headers: authHeaders(sessionId ? { 'Mcp-Session-Id': sessionId } : {}),
+    body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }),
+  }).catch(() => {});
+}
+
+async function listTools() {
+  const now = Date.now();
+  if (toolsCache && now - toolsCacheAt < 60000) return toolsCache;
+  await ensureInitialized();
+  const r = await rpc('tools/list', {}, 2);
+  toolsCache = (r && r.tools) || [];
+  toolsCacheAt = now;
+  return toolsCache;
+}
+
+function pickTool(tools) {
+  if (process.env.MG_MCP_TOOL) return tools.find((t) => t.name === process.env.MG_MCP_TOOL) || null;
+  const kw = ['search', 'magnet', 'query', 'find', 'torrent', '资源', '搜索', '磁力', 'bt'];
+  for (const k of kw) {
+    const hit = tools.find((t) =>
+      (t.name || '').toLowerCase().includes(k) || (t.description || '').toLowerCase().includes(k));
+    if (hit) return hit;
+  }
+  return tools[0] || null;
+}
+
+function pickQueryParam(tool) {
+  if (process.env.MG_MCP_QUERY_PARAM) return process.env.MG_MCP_QUERY_PARAM;
+  const names = Object.keys((tool && tool.inputSchema && tool.inputSchema.properties) || {}).map((n) => n.toLowerCase());
+  for (const c of ['q', 'query', 'keyword', 'name', 'text', 'search', 'word', 'term', 'key']) {
+    if (names.includes(c)) return c;
+  }
+  return names[0] || 'query';
+}
+
+function pickPageParam(tool) {
+  if (process.env.MG_MCP_PAGE_PARAM) return process.env.MG_MCP_PAGE_PARAM;
+  const names = Object.keys((tool && tool.inputSchema && tool.inputSchema.properties) || {}).map((n) => n.toLowerCase());
+  for (const c of ['page', 'pagenum', 'p', 'offset', 'pageindex', 'pageno']) {
+    if (names.includes(c)) return c;
+  }
+  return null;
+}
+
+function normalizeItems(raw) {
+  let arr = Array.isArray(raw) ? raw : (raw && raw.items ? raw.items : (raw ? [raw] : []));
+  if (!Array.isArray(arr)) arr = [];
+  return arr.map((it) => {
+    if (typeof it === 'string') it = { t: it };
+    const i = it.infoHash || it.hash || it.info_hash || it.btih || it.id ||
+      (it.magnet ? (it.magnet.match(/btih:([a-f0-9]+)/i) || [])[1] : '') || '';
+    const t = it.title || it.name || it.t || it.text || '';
+    const s = it.size || it.humanSize || it.s || '';
+    const d = it.date || it.createdAt || it.pubDate || it.d || '';
+    let m = it.magnet || '';
+    if (!m && i) m = `magnet:?xt=urn:btih:${String(i).toUpperCase()}`;
+    return { i: String(i), t: String(t), s: String(s), d: String(d), m };
+  });
+}
+
+async function doSearch(q, page) {
+  const tools = await listTools();
+  const tool = pickTool(tools);
+  if (!tool) throw new Error('MCP 服务器未暴露可用工具（tools/list 为空）');
+  const qParam = pickQueryParam(tool);
+  const pParam = pickPageParam(tool);
+  const args = { [qParam]: q };
+  if (pParam) args[pParam] = page;
+  const r = await rpc('tools/call', { name: tool.name, arguments: args }, 3);
+  // r = { content:[{type,text}], isError } 或 { result }
+  let text = '';
+  if (r && Array.isArray(r.content)) {
+    text = r.content.map((c) => c.text || (c.data ? JSON.stringify(c.data) : '')).join('');
+  } else if (typeof r === 'string') {
+    text = r;
+  } else if (r && r.result) {
+    text = typeof r.result === 'string' ? r.result : JSON.stringify(r.result);
+  }
+  if (r && r.isError) throw new Error(`MCP tool ${tool.name} returned error: ${text.slice(0, 300)}`);
+  let parsed;
+  try { parsed = JSON.parse(text); } catch { parsed = text; }
+  const items = normalizeItems(parsed);
+  const total = (parsed && parsed.total != null) ? parsed.total : items.length;
+  const start = (page - 1) * PAGE_SIZE;
+  const pageItems = items.slice(start, start + PAGE_SIZE);
+  return { items: pageItems, total: total || pageItems.length };
+}
+
+function sendJson(obj, status = 200) {
+  return new Response(JSON.stringify(obj), {
+    status,
+    headers: {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Access-Control-Allow-Origin': '*',
+      'Cache-Control': 'no-store',
+    },
+  });
+}
+
+export async function onRequestGet(context) {
+  try {
+    const u = new URL(context.request.url);
+    const op = u.searchParams.get('op');
+    if (op === 'tools') {
+      if (!MCP_TOKEN) return sendJson({ error: 'MG_MCP_TOKEN 未配置（请在 EdgeOne 项目环境变量中设置）' }, 500);
+      const tools = await listTools();
+      return sendJson({ url: MCP_URL, toolCount: tools.length, tools });
+    }
+    const q = u.searchParams.get('q') || '';
+    const page = Math.max(1, parseInt(u.searchParams.get('page') || '1', 10) || 1);
+    if (!MCP_TOKEN) {
+      return sendJson({ error: 'MG_MCP_TOKEN 未配置（请在 EdgeOne 项目环境变量中设置）' }, 500);
+    }
+    return sendJson(await doSearch(q, page));
+  } catch (e) {
+    return sendJson({ error: String((e && e.message) || e) }, 500);
+  }
+}
