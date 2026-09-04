@@ -2,104 +2,65 @@
 
 把本地影视磁力索引接入 JAVBUS 客户端，作为一个**可按关键词搜索**的私有数据源。
 
-## 这是什么
-
-- 一份 **JAVBUS 插件 JSON**：声明式配置，告诉 JAVBUS 去哪个 API 搜资源。
-- 一个 **EdgeOne Makers 上的搜索 API**（`edgeone-api/`）：把剧集库 + 影视库合并建索引，按片名子串做模糊搜索。
-
 数据规模：剧集 115,409 条 + 影视 58,175 条 = **173,584** 条。
 
 ## 安装插件（JAVBUS 客户端）
 
-在 JAVBUS 的「数据源 / JSON 插件」里添加，URL 填：
+在「数据源 / JSON 插件」里添加，URL 填：
 
 ```
 https://raw.githubusercontent.com/Carolove7/javbus-juji-plugin/master/javbus-plugin.json
 ```
 
-安装后，在搜索框输入**任意部分片名**即可模糊搜索（大小写不敏感、子串匹配），无需完整片名前缀。
-
-> 旧版分开的 `javbus-plugin-juji.json` / `javbus-plugin-yingshi.json` 已合并为本文件，无需再装两个。
+安装后在搜索框输入**任意部分片名**即可模糊搜索（大小写不敏感、子串匹配）。
 
 ## 搜索 API
 
-服务部署在已绑定自定义域名的 EdgeOne Makers 项目，公网地址 `https://mg.147771.xyz`。
+公网地址（自定义域名）：`https://mg.147771.xyz`
 
 | 端点 | 说明 |
 |------|------|
-| `GET /search?q=<词>&page=<n>` | **剧集 + 影视合并搜索**（插件用这个） |
+| `GET /search?q=<词>&page=<n>` | 剧集 + 影视合并搜索（插件用这个） |
 | `GET /health`                 | 健康检查 |
 
-返回 JAVBUS 认识的格式：
+返回格式：
 
 ```json
 { "items": [ { "i": "<infoHash>", "t": "<标题>", "s": "<大小>", "d": "<日期>" } ], "total": 173584 }
 ```
 
-- `q` 为空 → 返回全量并按页浏览（`pageSize` 默认 50）。
-- `q` 非空 → 标题子串匹配，按**匹配位置排序**（片名开头命中排最前）。
-- JAVBUS 会把 `{query}` 用 `Uri.encodeComponent` 编码后作为 `q` 传入，中文关键词正常。
-- `magnet` 不入库，由插件用 `infoHash` 现场拼装 `magnet:?xt=urn:btih:{infoHashUpper}`。
+- `q` 为空 → 返回全量按页浏览（`pageSize` 默认 50）；`q` 非空 → 标题子串匹配，按匹配位置排序。
+- `magnet` 不入库，由插件用 `infoHash` 拼装 `magnet:?xt=urn:btih:{infoHashUpper}`。
 
 ## 目录结构
 
 ```
 javbus-plugin/
-├── javbus-plugin.json          # 合并插件（单一，指向 mg.147771.xyz）
-├── edgeone-api/                # EdgeOne Makers 搜索服务（Cloud Functions）
-│   ├── cloud-functions/        # 部署为 EdgeOne 函数，路由见下
-│   │   ├── index.js           # GET /        信息页
-│   │   ├── health.js          # GET /health  健康检查
-│   │   ├── search.js          # GET /search?q=&page=  合并搜索
-│   │   └── _data/             # 构建期生成的合并索引分片（随代码包部署，被 gitignore）
-│   │       ├── all-meta.json  # { total, parts }
-│   │       └── all-1.json … all-N.json
-│   ├── build_data.js           # 合并 index/ 分片为 _data/all-*.json（每片≤16MB，规避单文件大小限制）
-│   ├── package.json
-│   └── .gitignore              # cloud-functions/_data/ 与 node_modules/ 不入库
-└── index/                      # 静态分片索引（剧集 116 片 / 影视 59 片，每片 1000 条）
-    ├── juji/juji-1.json ... juji-116.json
-    └── yingshi/yingshi-1.json ... yingshi-59.json
+├── javbus-plugin.json      # 合并插件（指向 mg.147771.xyz）
+├── edgeone-api/            # EdgeOne Makers 搜索服务（Cloud Functions）
+│   ├── cloud-functions/    # 部署为函数：search.js→/search, health.js→/health, index.js→/
+│   ├── build_data.js       # 合并 index/ 分片
+│   └── package.json
+└── index/                 # 静态分片索引（剧集 116 / 影视 59 片，每片 1000 条）
 ```
 
-## 数据来源与构建
+## 工作原理
 
-索引来自本地影视磁力清单，拍平后按 `movie[]/tv[] → items[]` 分组，再切成每片 1000 条的分片存入 `index/`。
-`edgeone-api/build_data.js` 在部署构建阶段（或本地）把分片合并切片为 `cloud-functions/_data/all-1.json … all-N.json`（每片约 16MB，由 `all-meta.json` 记录片数），随函数代码包一起上传；运行时函数冷启动读本地分片拼回全集（缺失时回退到 jsDelivr 拉取 `index/` 分片合并）：
+- `index/` 存 175 个分片（剧集 + 影视），是数据源。
+- EdgeOne Makers 部署的是 **Cloud Functions**（`cloud-functions/` 下的 `onRequest*` handler），不是常驻服务。
+- 函数运行时从 jsDelivr 拉取 `index/` 分片，在内存中拼成全集（冷启动约 6s，之后实例缓存复用）；搜索为标题子串模糊匹配，剧集与影视统一返回。
 
-- 优先读本地 `index/`（开发 / 本地有仓库时）；
-- 否则从 jsDelivr 镜像拉取 GitHub 仓库分片合并（部署环境无本地 `index/` 时）。
-
-```bash
-cd edgeone-api
-npm install
-npm run build      # 生成 cloud-functions/_data/all-*.json（剧集 + 影视合并切片）
-# 本地验证可用 EdgeOne Makers 本地开发：edgeone makers dev -n javbus-search-api
-```
-
-## 部署到自己的 EdgeOne 账号
-
-本项目通过 **EdgeOne Makers** 部署（已连接连接器，登录态由连接器保证，无需手动登录）：
+## 部署
 
 ```bash
 cd edgeone-api
 PAGES_SOURCE=skills edgeone makers deploy -n javbus-search-api --json
 ```
 
-构建会自动跑 `npm run build` 生成索引，并部署到你的 EdgeOne 账号（控制台可见、可绑自定义域名）。
+## 自定义域名（上线必做）
 
-### 自定义域名（重要）
-
-EdgeOne 默认的 `*.edgeone.cool` 是**预览鉴权域名**（不带 token 返回 401，带 token 需浏览器 SSO 跳转），JAVBUS 插件无法直接调用。要让插件可用，需在 EdgeOne 控制台给项目**绑定自定义域名并完成托管关联**（CNAME 指向项目分配的 EdgeOne 目标），并配置 HTTPS。绑定后该域名公网免鉴权，插件 URL 直接填：
+EdgeOne 默认 `*.edgeone.cool` 是**预览鉴权域名**（需浏览器 SSO，插件无法直接调用）。要让插件可用，需在 EdgeOne 控制台给项目 `javbus-search-api` **绑定自定义域名**并完成 CNAME 关联 + HTTPS。绑定后插件 URL 即：
 
 ```
-https://你的域名/search?q={query}&page={page}
+https://mg.147771.xyz/search?q={query}&page={page}
 ```
-
-本项目自定义域名：`mg.147771.xyz`（已在控制台绑定 + HTTPS）。
-
-## 备注
-
-- 搜索为**标题子串**模糊匹配，输入越精确结果越准；剧集与影视统一返回、按相关性排序。
-- 索引更新：改 `index/` 分片后重新部署即可（或本地先 `npm run build`）。
-- 数据项仅含 `{i,t,s,d}`，`magnet` 由插件端用 `infoHash` 拼装，不占用索引体积。
