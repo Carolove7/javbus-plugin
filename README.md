@@ -16,7 +16,7 @@ https://raw.githubusercontent.com/Carolove7/javbus-juji-plugin/master/javbus-plu
 
 ## 搜索 API
 
-公网地址（自定义域名）：`https://mg.147771.xyz`
+公网地址：`https://mg.147771.xyz`
 
 | 端点 | 说明 |
 |------|------|
@@ -55,12 +55,4 @@ javbus-plugin/
 ```bash
 cd edgeone-api
 PAGES_SOURCE=skills edgeone makers deploy -n javbus-search-api --json
-```
-
-## 自定义域名（上线必做）
-
-EdgeOne 默认 `*.edgeone.cool` 是**预览鉴权域名**（需浏览器 SSO，插件无法直接调用）。要让插件可用，需在 EdgeOne 控制台给项目 `javbus-search-api` **绑定自定义域名**并完成 CNAME 关联 + HTTPS。绑定后插件 URL 即：
-
-```
-https://mg.147771.xyz/search?q={query}&page={page}
 ```
