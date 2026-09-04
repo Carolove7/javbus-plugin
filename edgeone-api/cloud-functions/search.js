@@ -30,33 +30,43 @@ async function readLocalChunks() {
   return items;
 }
 
-// 兜底：从远程拉取 index/ 分片合并（按序命名，遇 404 停止）
-async function fetchShards(type) {
-  const items = [];
-  let n = 1;
-  const MAX = 500;
-  while (n <= MAX) {
-    const rel = `index/${type}/${type}-${n}.json`;
-    let got = null;
-    for (const base of SOURCES) {
-      try {
-        const r = await fetch(`${base}/${rel}`, { signal: AbortSignal.timeout(15000) });
-        if (r.status === 404) return items;
-        if (!r.ok) continue;
-        got = await r.json();
-        break;
-      } catch {
-        // 该源失败，尝试下一个
-      }
+// 兜底：并行批量从远程拉取 index/ 分片合并（分片连续编号，整批 404 即到末尾）
+async function fetchOne(type, n) {
+  const rel = `index/${type}/${type}-${n}.json`;
+  for (const base of SOURCES) {
+    try {
+      const r = await fetch(`${base}/${rel}`, { signal: AbortSignal.timeout(15000) });
+      if (r.status === 404) return null;
+      if (!r.ok) continue;
+      const obj = await r.json();
+      return obj.items || [];
+    } catch {
+      // 该源失败，尝试下一个
     }
-    if (!got) {
-      if (items.length > 0) return items;
-      throw new Error(`无法拉取 ${rel}（数据源均失败，可能网络受限）`);
-    }
-    items.push(...(got.items || []));
-    n++;
   }
-  return items;
+  return null;
+}
+
+async function fetchShards(type) {
+  const MAX = 250;
+  const BATCH = 40;
+  const all = [];
+  let consecutiveNull = 0;
+  for (let start = 1; start <= MAX; start += BATCH) {
+    const nums = [];
+    for (let n = start; n < start + BATCH && n <= MAX; n++) nums.push(n);
+    const results = await Promise.all(nums.map((n) => fetchOne(type, n)));
+    let batchGot = false;
+    for (const items of results) {
+      if (items === null) continue;
+      batchGot = true;
+      all.push(...items);
+    }
+    consecutiveNull = batchGot ? 0 : consecutiveNull + BATCH;
+    if (consecutiveNull >= BATCH && all.length > 0) break; // 连续整批缺失 = 已到末尾
+  }
+  if (all.length === 0) throw new Error(`无法拉取 index/${type}/（数据源均失败，可能网络受限）`);
+  return all;
 }
 
 async function loadAll() {
