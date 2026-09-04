@@ -28,8 +28,6 @@ https://raw.githubusercontent.com/Carolove7/javbus-juji-plugin/master/javbus-plu
 | 端点 | 说明 |
 |------|------|
 | `GET /search?q=<词>&page=<n>` | **剧集 + 影视合并搜索**（插件用这个） |
-| `GET /juji?q=<词>&page=<n>`   | 仅剧集库 |
-| `GET /yingshi?q=<词>&page=<n>` | 仅影视库 |
 | `GET /health`                 | 健康检查 |
 
 返回 JAVBUS 认识的格式：
@@ -50,7 +48,7 @@ javbus-plugin/
 ├── javbus-plugin.json          # 合并插件（单一，指向 mg.147771.xyz）
 ├── edgeone-api/                # EdgeOne Makers 搜索服务
 │   ├── server.js               # 零依赖 Node HTTP 服务
-│   ├── build_data.js           # 合并 index/ 分片为 data/<type>-all.json
+│   ├── build_data.js           # 合并 index/ 分片为 data/all.json
 │   ├── package.json
 │   ├── .gitignore              # data/ 与 node_modules/ 不入库
 │   └── data/                   # 运行时生成的合并索引（被 gitignore，构建期自动生成）
@@ -62,7 +60,7 @@ javbus-plugin/
 ## 数据来源与构建
 
 索引来自本地影视磁力清单，拍平后按 `movie[]/tv[] → items[]` 分组，再切成每片 1000 条的分片存入 `index/`。
-`edgeone-api/build_data.js` 在部署构建阶段（或本地）把分片合并为 `data/<type>-all.json` 载入内存：
+`edgeone-api/build_data.js` 在部署构建阶段（或本地）把分片合并为 `data/all.json` 载入内存：
 
 - 优先读本地 `index/`（开发 / 本地有仓库时）；
 - 否则从 jsDelivr 镜像拉取 GitHub 仓库分片合并（部署环境无本地 `index/` 时）。
@@ -70,7 +68,7 @@ javbus-plugin/
 ```bash
 cd edgeone-api
 npm install
-npm run build      # 生成 data/juji-all.json + data/yingshi-all.json
+npm run build      # 生成 data/all.json（剧集 + 影视合并）
 node server.js     # 本地起服务（默认 3000 端口）
 ```
 
@@ -80,7 +78,7 @@ node server.js     # 本地起服务（默认 3000 端口）
 
 ```bash
 cd edgeone-api
-PAGES_SOURCE=skills edgeone makers deploy -n javbus-search-api --site china --json
+PAGES_SOURCE=skills edgeone makers deploy -n javbus-search-api --json
 ```
 
 构建会自动跑 `npm run build` 生成索引，并部署到你的 EdgeOne 账号（控制台可见、可绑自定义域名）。

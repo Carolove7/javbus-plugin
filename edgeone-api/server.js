@@ -1,10 +1,8 @@
 // JAVBUS 搜索适配服务 (EdgeOne / Node HTTP)
 // 路由:
 //   GET /search?q=<关键词>&page=<n>  剧集+影视 合并搜索（单一插件用这个）
-//   GET /juji?q=<关键词>&page=<n>    剧集库搜索
-//   GET /yingshi?q=<关键词>&page=<n> 影视库搜索
 //   GET / 或 /health                  健康检查
-// 数据来自本地 data/<type>-all.json（启动时载入内存），按标题 t 做大小写不敏感子串过滤。
+// 数据来自本地 data/all.json（启动时载入内存），按标题 t 做大小写不敏感子串过滤。
 // 返回 JAVBUS 认识的 { items, total }，items 元素为 {i,t,s,d}。
 
 import http from 'node:http';
@@ -15,53 +13,35 @@ import { buildAll } from './build_data.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PAGE_SIZE = Number(process.env.PAGE_SIZE || 50);
-const DATA_DIR = path.join(__dirname, 'data');
+const DATA_FILE = path.join(__dirname, 'data', 'all.json');
 
-const DATA = {}; // { juji: [...], yingshi: [...] }
-const loading = {}; // in-flight 去重
+let ALL = null;
+let loading = null; // in-flight 去重
 
-async function loadSet(name) {
-  if (DATA[name]) return DATA[name];
-  if (loading[name]) return loading[name];
-  loading[name] = (async () => {
+// 载入合并全集（data/all.json）。缺失时运行时即时构建兜底。
+async function loadAll() {
+  if (ALL) return ALL;
+  if (loading) return loading;
+  loading = (async () => {
     try {
-      const raw = await readFile(path.join(DATA_DIR, `${name}-all.json`), 'utf8');
-      const obj = JSON.parse(raw);
-      DATA[name] = obj.items || [];
-      console.log(`[load] ${name}: ${DATA[name].length} items`);
-      return DATA[name];
+      const obj = JSON.parse(await readFile(DATA_FILE, 'utf8'));
+      ALL = obj.items || [];
+      console.log(`[load] all: ${ALL.length} items`);
+      return ALL;
     } catch {
       // 数据文件缺失（如 Makers 构建未生成 / 构建期拉取失败）：运行时即时构建兜底
-      console.warn(`[load] ${name} data missing, building on demand...`);
+      console.warn('[load] data/all.json missing, building on demand...');
       await buildAll();
-      const raw = await readFile(path.join(DATA_DIR, `${name}-all.json`), 'utf8');
-      const obj = JSON.parse(raw);
-      DATA[name] = obj.items || [];
-      console.log(`[load] ${name}: ${DATA[name].length} items (built on demand)`);
-      return DATA[name];
+      const obj = JSON.parse(await readFile(DATA_FILE, 'utf8'));
+      ALL = obj.items || [];
+      console.log(`[load] all: ${ALL.length} items (built on demand)`);
+      return ALL;
     }
   })();
   try {
-    return await loading[name];
+    return await loading;
   } finally {
-    delete loading[name];
-  }
-}
-
-// 合并搜索：剧集 + 影视 合并为一个数据集（缓存于 DATA.all）
-async function loadCombined() {
-  if (DATA.all) return DATA.all;
-  if (loading.all) return loading.all;
-  loading.all = (async () => {
-    const [juji, yingshi] = await Promise.all([loadSet('juji'), loadSet('yingshi')]);
-    DATA.all = [...juji, ...yingshi];
-    console.log(`[load] all: ${DATA.all.length} items (juji ${juji.length} + yingshi ${yingshi.length})`);
-    return DATA.all;
-  })();
-  try {
-    return await loading.all;
-  } finally {
-    delete loading.all;
+    loading = null;
   }
 }
 
@@ -100,23 +80,17 @@ const server = http.createServer(async (req, res) => {
     const seg = u.pathname.replace(/^\/+|\/+$/g, '');
 
     if (seg === '' || seg === 'health' || seg === 'ping') {
-      return sendJson(res, 200, { ok: true, pageSize: PAGE_SIZE, loaded: Object.keys(DATA) });
+      return sendJson(res, 200, { ok: true, pageSize: PAGE_SIZE, loaded: !!ALL });
     }
 
-    let type = null;
-    if (seg === 'search' || seg === 'all' || seg.startsWith('search')) type = 'all';
-    else if (seg === 'juji' || seg.startsWith('juji')) type = 'juji';
-    else if (seg === 'yingshi' || seg.startsWith('yingshi')) type = 'yingshi';
-    else type = (u.searchParams.get('type') || 'juji').toLowerCase();
-
-    if (type !== 'all' && type !== 'juji' && type !== 'yingshi') {
-      return sendJson(res, 400, { error: 'unknown type, use search|juji|yingshi' });
+    if (seg !== 'search') {
+      return sendJson(res, 404, { error: 'not found, use /search or /health' });
     }
 
     const q = u.searchParams.get('q') || '';
     const page = u.searchParams.get('page') || '1';
 
-    const items = type === 'all' ? await loadCombined() : await loadSet(type);
+    const items = await loadAll();
     return sendJson(res, 200, search(items, q, page));
   } catch (e) {
     return sendJson(res, 500, { error: String((e && e.message) || e) });
@@ -127,9 +101,7 @@ const PORT = Number(process.env.PORT || 3000);
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`javbus-edgeone-api listening on ${PORT} (PAGE_SIZE=${PAGE_SIZE})`);
   // 预载，避免首个请求延迟；失败不致命（首次请求时再按需加载）
-  loadSet('juji').catch((e) => console.warn('preload juji failed:', e.message));
-  loadSet('yingshi').catch((e) => console.warn('preload yingshi failed:', e.message));
-  loadCombined().catch((e) => console.warn('preload all failed:', e.message));
+  loadAll().catch((e) => console.warn('preload all failed:', e.message));
 });
 
 export default server;

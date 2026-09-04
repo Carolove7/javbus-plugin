@@ -1,11 +1,12 @@
-// 合并 index/ 下的分片为 data/<type>-all.json（{"items":[...]}），供 EdgeOne 服务启动时载入。
-// 数据源优先级：本地 index/（存在时，开发/本地用）  >  jsDelivr 镜像  >  GitHub raw。
-// 这样在 EdgeOne Makers 构建环境无本地 index/ 时，也能在 build 阶段从 GitHub 拉取并合并，
-// 部署包无需携带 33MB 数据，规避上传/构建体积上限，且数据源始终与仓库一致、自动最新。
-// 用法: node build_data.js   （在 edgeone-api/ 目录下运行；被 server.js import 时不会自动执行）
+// 合并 index/ 下 juji + yingshi 分片为单个 data/all.json（{ items, total, updatedAt }）。
+// 数据源优先级：本地 index/（存在时） > jsDelivr 镜像 > GitHub raw。
+// 这样在 EdgeOne Makers 构建环境无本地 index/ 时，也能在 build 阶段从远程拉取并合并，
+// 部署包无需携带 33MB 数据。
+// 用法: node build_data.js
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { realpathSync } from 'node:fs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..'); // javbus-plugin/
@@ -13,7 +14,6 @@ const OUT_DIR = path.join(__dirname, 'data');
 
 const REPO = 'Carolove7/javbus-juji-plugin';
 const BRANCH = 'master';
-// jsDelivr 在国内构建环境可达性更好，作为首选；GitHub raw 兜底。
 const SOURCES = [
   `https://cdn.jsdelivr.net/gh/${REPO}@${BRANCH}`,
   `https://raw.githubusercontent.com/${REPO}/${BRANCH}`,
@@ -53,7 +53,7 @@ async function fetchShards(type) {
       }
     }
     if (!got) {
-      if (items.length > 0) return items; // 已拿到部分，遇到空洞即视为结束
+      if (items.length > 0) return items; // 已拿到部分，遇空洞即视为结束
       throw new Error(`无法拉取 ${rel}（所有数据源均失败，可能网络受限）`);
     }
     items.push(...(got.items || []));
@@ -63,27 +63,29 @@ async function fetchShards(type) {
 }
 
 async function build(type) {
-  let items = localShards(type);
-  let from = 'local';
-  if (!items) {
-    items = await fetchShards(type);
-    from = 'remote(jsdelivr/github)';
-  }
+  const local = localShards(type);
+  return local ? local : fetchShards(type);
+}
+
+async function main() {
+  const [juji, yingshi] = await Promise.all([build('juji'), build('yingshi')]);
+  const items = [...juji, ...yingshi];
   fs.mkdirSync(OUT_DIR, { recursive: true });
-  fs.writeFileSync(path.join(OUT_DIR, `${type}-all.json`), JSON.stringify({ items }));
-  const size = fs.statSync(path.join(OUT_DIR, `${type}-all.json`)).size;
-  console.log(`${type}: ${items.length} items (${from}) -> data/${type}-all.json (${size} bytes)`);
+  fs.writeFileSync(
+    path.join(OUT_DIR, 'all.json'),
+    JSON.stringify({ items, total: items.length, updatedAt: new Date().toISOString() })
+  );
+  const size = fs.statSync(path.join(OUT_DIR, 'all.json')).size;
+  console.log(
+    `all: ${items.length} items (juji ${juji.length} + yingshi ${yingshi.length}) -> data/all.json (${size} bytes)`
+  );
 }
 
-export async function buildAll() {
-  await build('juji');
-  await build('yingshi');
-}
-
-// 仅当作为 CLI 直接运行（而非被 server.js import）时才自动构建
-if (import.meta.url === `file://${process.argv[1]}`) {
-  buildAll().catch((e) => {
+if (process.argv[1] && realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1])) {
+  main().catch((e) => {
     console.error(e);
     process.exit(1);
   });
 }
+
+export { main as buildAll };
