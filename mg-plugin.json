@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "magnet-kiteyuan": {
+      "type": "streamableHttp",
+      "url": "https://magnet.kiteyuan.info/mcp",
+      "timeout": 600000,
+      "disabled": false,
+      "headers": {
+        "Authorization": "Bearer ${MG_MCP_TOKEN}"
+      }
+    }
+  },
+  "_comment": "MCP 连接器配置（参考/共享用，仓库内不含真实密钥）。真实 Token 仅在本地 ~/.workbuddy/mcp.json 中（已配置），或运行时通过环境变量 MG_MCP_TOKEN 注入。启用方式：在 WorkBuddy 左侧「连接器」添加自定义连接器并粘贴此 mcpServers 片段，或直接将 magnet-kiteyuan 条目并入 ~/.workbuddy/mcp.json；添加后需重启 WorkBuddy 并点「信任(Trust)」使状态灯变绿。注意：JAVBUS 的 plugin.json 是 GET 搜索声明，无法直接调用 /mcp 这类 JSON-RPC 服务；本文件为 WorkBuddy MCP 连接器配置，与 ys-plugin.json（JAVBUS 插件）是两套不同体系。"
+}
