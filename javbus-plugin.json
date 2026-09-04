@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "id": "javbus-all-gh",
+  "name": "影视库·搜索 (173584)",
+  "enabled": true,
+  "baseUrl": "https://mg.147771.xyz",
+  "search": {
+    "method": "GET",
+    "url": "https://mg.147771.xyz/search?q={query}&page={page}",
+    "responseType": "json",
+    "itemsPath": "items",
+    "totalPath": "total",
+    "pageSize": 50
+  },
+  "fields": {
+    "sourceItemId": "i",
+    "title": "t",
+    "infoHash": "i",
+    "magnet": "m",
+    "humanSize": "s",
+    "createdAt": "d"
+  },
+  "defaults": {
+    "magnet": "magnet:?xt=urn:btih:{infoHashUpper}"
+  },
+  "_comment": "剧集库+影视库 合并搜索版（单一插件）。后端为已绑定自定义域名 mg.147771.xyz 的 EdgeOne Makers 服务（javbus-plugin/edgeone-api），/search 端点同时检索剧集(115409)与影视(58175)，按标题 t 做大小写不敏感子串过滤并按匹配位置排序（startsWith 优先）。JAVBUS 搜索框关键词经 Uri.encodeComponent 编码为 q 传入；翻页由 total/pageSize 推导（pageSize=50）。空查询返回全量并按页浏览。数据项仅含 {i,t,s,d}，magnet 由 defaults 用 infoHash 现场拼装。"
+}

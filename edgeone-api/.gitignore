@@ -1,3 +1,7 @@
 # 33MB 合并索引不进 git（部署时随目录上传，但避免污染插件仓库）
 data/
 node_modules/
+# EdgeOne Makers 部署产物 / 本地环境（非源码）
+.edgeone/
+.env
+package-lock.json
