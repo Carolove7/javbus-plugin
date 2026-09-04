@@ -1,7 +1,9 @@
-// 合并 index/ 下 juji + yingshi 分片为单个 data/all.json（{ items, total, updatedAt }）。
+// 合并 index/ 下 juji + yingshi 分片，输出为「单一逻辑集合，多物理分片」：
+//   data/all-meta.json        { total, parts, updatedAt }
+//   data/all-1.json ... all-N.json  每片 { items:[...] }
+// 分片原因：EdgeOne 函数部署对单个文件大小有限制（实测单文件 ~22MB 可过，33MB 失败），
+// 故把合并全集切成每片约 16MB 的多个文件，避免单文件超限。运行时 server.js 载入全部分片拼回一个数组。
 // 数据源优先级：本地 index/（存在时） > jsDelivr 镜像 > GitHub raw。
-// 这样在 EdgeOne Makers 构建环境无本地 index/ 时，也能在 build 阶段从远程拉取并合并，
-// 部署包无需携带 33MB 数据。
 // 用法: node build_data.js
 import fs from 'node:fs';
 import path from 'node:path';
@@ -18,6 +20,9 @@ const SOURCES = [
   `https://cdn.jsdelivr.net/gh/${REPO}@${BRANCH}`,
   `https://raw.githubusercontent.com/${REPO}/${BRANCH}`,
 ];
+
+// 每片目标大小（字节）。173584 条约 193 字节/条，16MB ≈ 8.4 万条，切成 3 片足够留余量。
+const CHUNK_BYTES = 16 * 1024 * 1024;
 
 function localShards(type) {
   const dir = path.join(ROOT, 'index', type);
@@ -67,18 +72,42 @@ async function build(type) {
   return local ? local : fetchShards(type);
 }
 
+function writeChunks(items, updatedAt) {
+  fs.mkdirSync(OUT_DIR, { recursive: true });
+  // 清掉旧的 all-* 分片，避免残留
+  for (const f of fs.readdirSync(OUT_DIR)) {
+    if (/^all(-\d+)?\.json$/.test(f)) fs.unlinkSync(path.join(OUT_DIR, f));
+  }
+  // 估算每片条数：按当前平均字节/条切，保证单文件不超过 CHUNK_BYTES
+  const avg = items.length ? JSON.stringify(items[0]).length || 193 : 193;
+  const perChunk = Math.max(1, Math.floor(CHUNK_BYTES / avg));
+  const parts = Math.max(1, Math.ceil(items.length / perChunk));
+  for (let p = 1; p <= parts; p++) {
+    const slice = items.slice((p - 1) * perChunk, p * perChunk);
+    fs.writeFileSync(
+      path.join(OUT_DIR, `all-${p}.json`),
+      JSON.stringify({ items: slice })
+    );
+  }
+  fs.writeFileSync(
+    path.join(OUT_DIR, 'all-meta.json'),
+    JSON.stringify({ total: items.length, parts, updatedAt })
+  );
+  return parts;
+}
+
 async function main() {
   const [juji, yingshi] = await Promise.all([build('juji'), build('yingshi')]);
   const items = [...juji, ...yingshi];
-  fs.mkdirSync(OUT_DIR, { recursive: true });
-  fs.writeFileSync(
-    path.join(OUT_DIR, 'all.json'),
-    JSON.stringify({ items, total: items.length, updatedAt: new Date().toISOString() })
-  );
-  const size = fs.statSync(path.join(OUT_DIR, 'all.json')).size;
+  const updatedAt = new Date().toISOString();
+  const parts = writeChunks(items, updatedAt);
+  // 汇总体积日志
+  let bytes = 0;
+  for (let p = 1; p <= parts; p++) bytes += fs.statSync(path.join(OUT_DIR, `all-${p}.json`)).size;
   console.log(
-    `all: ${items.length} items (juji ${juji.length} + yingshi ${yingshi.length}) -> data/all.json (${size} bytes)`
+    `all: ${items.length} items (juji ${juji.length} + yingshi ${yingshi.length}) -> data/all-1..all-${parts}.json (${bytes} bytes, meta.parts=${parts})`
   );
+  return parts;
 }
 
 if (process.argv[1] && realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1])) {

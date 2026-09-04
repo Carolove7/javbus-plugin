@@ -48,7 +48,7 @@ javbus-plugin/
 ├── javbus-plugin.json          # 合并插件（单一，指向 mg.147771.xyz）
 ├── edgeone-api/                # EdgeOne Makers 搜索服务
 │   ├── server.js               # 零依赖 Node HTTP 服务
-│   ├── build_data.js           # 合并 index/ 分片为 data/all.json
+│   ├── build_data.js           # 合并 index/ 分片为 data/all-1.json...all-N.json（每片≤16MB，规避单文件大小限制）
 │   ├── package.json
 │   ├── .gitignore              # data/ 与 node_modules/ 不入库
 │   └── data/                   # 运行时生成的合并索引（被 gitignore，构建期自动生成）
@@ -60,7 +60,7 @@ javbus-plugin/
 ## 数据来源与构建
 
 索引来自本地影视磁力清单，拍平后按 `movie[]/tv[] → items[]` 分组，再切成每片 1000 条的分片存入 `index/`。
-`edgeone-api/build_data.js` 在部署构建阶段（或本地）把分片合并为 `data/all.json` 载入内存：
+`edgeone-api/build_data.js` 在部署构建阶段（或本地）把分片合并切片为 `data/all-1.json … all-N.json`（每片约 16MB，由 `data/all-meta.json` 记录片数），运行时载入全部分片拼回全集：
 
 - 优先读本地 `index/`（开发 / 本地有仓库时）；
 - 否则从 jsDelivr 镜像拉取 GitHub 仓库分片合并（部署环境无本地 `index/` 时）。

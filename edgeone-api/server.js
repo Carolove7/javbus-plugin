@@ -2,7 +2,8 @@
 // 路由:
 //   GET /search?q=<关键词>&page=<n>  剧集+影视 合并搜索（单一插件用这个）
 //   GET / 或 /health                  健康检查
-// 数据来自本地 data/all.json（启动时载入内存），按标题 t 做大小写不敏感子串过滤。
+// 数据来自本地 data/all-1.json ... all-N.json（由 all-meta.json 指示片数，启动时载入内存拼回全集），
+// 按标题 t 做大小写不敏感子串过滤。
 // 返回 JAVBUS 认识的 { items, total }，items 元素为 {i,t,s,d}。
 
 import http from 'node:http';
@@ -13,27 +14,26 @@ import { buildAll } from './build_data.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PAGE_SIZE = Number(process.env.PAGE_SIZE || 50);
-const DATA_FILE = path.join(__dirname, 'data', 'all.json');
+const DATA_DIR = path.join(__dirname, 'data');
 
 let ALL = null;
 let loading = null; // in-flight 去重
 
-// 载入合并全集（data/all.json）。缺失时运行时即时构建兜底。
+// 载入合并全集（data/all-1.json ... all-N.json，由 all-meta.json 指示片数）。
+// 缺失时运行时即时构建兜底。
 async function loadAll() {
   if (ALL) return ALL;
   if (loading) return loading;
   loading = (async () => {
     try {
-      const obj = JSON.parse(await readFile(DATA_FILE, 'utf8'));
-      ALL = obj.items || [];
+      ALL = await readChunks();
       console.log(`[load] all: ${ALL.length} items`);
       return ALL;
     } catch {
       // 数据文件缺失（如 Makers 构建未生成 / 构建期拉取失败）：运行时即时构建兜底
-      console.warn('[load] data/all.json missing, building on demand...');
+      console.warn('[load] data/all-*.json missing, building on demand...');
       await buildAll();
-      const obj = JSON.parse(await readFile(DATA_FILE, 'utf8'));
-      ALL = obj.items || [];
+      ALL = await readChunks();
       console.log(`[load] all: ${ALL.length} items (built on demand)`);
       return ALL;
     }
@@ -43,6 +43,18 @@ async function loadAll() {
   } finally {
     loading = null;
   }
+}
+
+async function readChunks() {
+  const metaRaw = await readFile(path.join(DATA_DIR, 'all-meta.json'), 'utf8');
+  const meta = JSON.parse(metaRaw);
+  const parts = meta.parts || 1;
+  const items = [];
+  for (let n = 1; n <= parts; n++) {
+    const obj = JSON.parse(await readFile(path.join(DATA_DIR, `all-${n}.json`), 'utf8'));
+    items.push(...(obj.items || []));
+  }
+  return items;
 }
 
 function search(items, q, page) {
