@@ -1,9 +1,9 @@
-// 合并 index/ 下 juji + yingshi 分片，输出为「单一逻辑集合，多物理分片」：
-//   data/all-meta.json        { total, parts, updatedAt }
-//   data/all-1.json ... all-N.json  每片 { items:[...] }
-// 分片原因：EdgeOne 函数部署对单个文件大小有限制（实测单文件 ~22MB 可过，33MB 失败），
-// 故把合并全集切成每片约 16MB 的多个文件，避免单文件超限。运行时 server.js 载入全部分片拼回一个数组。
-// 数据源优先级：本地 index/（存在时） > jsDelivr 镜像 > GitHub raw。
+// 合并 index/ 下 juji + yingshi 分片，输出为「单一逻辑集合，多物理分片」，供 Cloud Function 运行时载入：
+//   cloud-functions/_data/all-meta.json   { total, parts, updatedAt }
+//   cloud-functions/_data/all-1.json ... all-N.json  每片 { items:[...] }
+// 分片原因：①EdgeOne 函数部署对单个文件大小有限制（实测单文件 ~22MB 可过，33MB 失败）；
+// ②Cloud Function 随代码包部署时连同 _data 一起上传（代码包上限 128MB，33MB 安全）。函数冷启动时读本地分片拼回全集。
+// 数据源优先级：本地 index/（存在时） > jsDelivr 镜像 > GitHub raw（兜底，避免构建期拉取失败时仍能服务）。
 // 用法: node build_data.js
 import fs from 'node:fs';
 import path from 'node:path';
@@ -12,7 +12,7 @@ import { realpathSync } from 'node:fs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..'); // javbus-plugin/
-const OUT_DIR = path.join(__dirname, 'data');
+const OUT_DIR = path.join(__dirname, 'cloud-functions', '_data');
 
 const REPO = 'Carolove7/javbus-juji-plugin';
 const BRANCH = 'master';

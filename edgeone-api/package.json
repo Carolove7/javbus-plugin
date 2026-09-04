@@ -5,8 +5,7 @@
   "type": "module",
   "description": "JAVBUS 关键词搜索适配服务 (EdgeOne)",
   "scripts": {
-    "build": "node build_data.js",
-    "start": "node server.js"
+    "build": "node build_data.js"
   },
   "engines": {
     "node": ">=18"

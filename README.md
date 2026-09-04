@@ -46,12 +46,17 @@ https://raw.githubusercontent.com/Carolove7/javbus-juji-plugin/master/javbus-plu
 ```
 javbus-plugin/
 ├── javbus-plugin.json          # 合并插件（单一，指向 mg.147771.xyz）
-├── edgeone-api/                # EdgeOne Makers 搜索服务
-│   ├── server.js               # 零依赖 Node HTTP 服务
-│   ├── build_data.js           # 合并 index/ 分片为 data/all-1.json...all-N.json（每片≤16MB，规避单文件大小限制）
+├── edgeone-api/                # EdgeOne Makers 搜索服务（Cloud Functions）
+│   ├── cloud-functions/        # 部署为 EdgeOne 函数，路由见下
+│   │   ├── index.js           # GET /        信息页
+│   │   ├── health.js          # GET /health  健康检查
+│   │   ├── search.js          # GET /search?q=&page=  合并搜索
+│   │   └── _data/             # 构建期生成的合并索引分片（随代码包部署，被 gitignore）
+│   │       ├── all-meta.json  # { total, parts }
+│   │       └── all-1.json … all-N.json
+│   ├── build_data.js           # 合并 index/ 分片为 _data/all-*.json（每片≤16MB，规避单文件大小限制）
 │   ├── package.json
-│   ├── .gitignore              # data/ 与 node_modules/ 不入库
-│   └── data/                   # 运行时生成的合并索引（被 gitignore，构建期自动生成）
+│   └── .gitignore              # cloud-functions/_data/ 与 node_modules/ 不入库
 └── index/                      # 静态分片索引（剧集 116 片 / 影视 59 片，每片 1000 条）
     ├── juji/juji-1.json ... juji-116.json
     └── yingshi/yingshi-1.json ... yingshi-59.json
@@ -60,7 +65,7 @@ javbus-plugin/
 ## 数据来源与构建
 
 索引来自本地影视磁力清单，拍平后按 `movie[]/tv[] → items[]` 分组，再切成每片 1000 条的分片存入 `index/`。
-`edgeone-api/build_data.js` 在部署构建阶段（或本地）把分片合并切片为 `data/all-1.json … all-N.json`（每片约 16MB，由 `data/all-meta.json` 记录片数），运行时载入全部分片拼回全集：
+`edgeone-api/build_data.js` 在部署构建阶段（或本地）把分片合并切片为 `cloud-functions/_data/all-1.json … all-N.json`（每片约 16MB，由 `all-meta.json` 记录片数），随函数代码包一起上传；运行时函数冷启动读本地分片拼回全集（缺失时回退到 jsDelivr 拉取 `index/` 分片合并）：
 
 - 优先读本地 `index/`（开发 / 本地有仓库时）；
 - 否则从 jsDelivr 镜像拉取 GitHub 仓库分片合并（部署环境无本地 `index/` 时）。
@@ -68,8 +73,8 @@ javbus-plugin/
 ```bash
 cd edgeone-api
 npm install
-npm run build      # 生成 data/all.json（剧集 + 影视合并）
-node server.js     # 本地起服务（默认 3000 端口）
+npm run build      # 生成 cloud-functions/_data/all-*.json（剧集 + 影视合并切片）
+# 本地验证可用 EdgeOne Makers 本地开发：edgeone makers dev -n javbus-search-api
 ```
 
 ## 部署到自己的 EdgeOne 账号
