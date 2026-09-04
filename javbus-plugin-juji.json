@@ -1,16 +1,16 @@
 {
   "schemaVersion": 1,
   "id": "juji-gh",
-  "name": "剧集库 (115409)",
+  "name": "剧集库·搜索 (115409)",
   "enabled": true,
-  "baseUrl": "https://raw.githubusercontent.com/Carolove7/javbus-juji-plugin/master",
+  "baseUrl": "https://832b4068eca74ea6ac66e3c8b631d892.app.workbuddy.link",
   "search": {
     "method": "GET",
-    "url": "https://raw.githubusercontent.com/Carolove7/javbus-juji-plugin/master/index/juji/juji-{page}.json",
+    "url": "https://832b4068eca74ea6ac66e3c8b631d892.app.workbuddy.link/juji?q={query}&page={page}",
     "responseType": "json",
     "itemsPath": "items",
     "totalPath": "total",
-    "pageSize": 1000
+    "pageSize": 50
   },
   "fields": {
     "sourceItemId": "i",
@@ -23,5 +23,5 @@
   "defaults": {
     "magnet": "magnet:?xt=urn:btih:{infoHashUpper}"
   },
-  "_comment": "剧集索引，共 115409 条 / 116 片，每片 1000 条。数据源为 GitHub raw 静态分片，JAVBUS 按 {page} 逐片拉取，翻页可用。magnet 不入库，由 defaults 用 infoHash 现场拼装。注意：静态源无服务端过滤，搜索框输入关键词不会筛选结果（只能按页浏览）；需要关键词搜索请部署仓库里的 javbus-adapter-worker.js 改用适配版插件。"
+  "_comment": "剧集库关键词搜索版。后端为 EdgeOne 上的 Node API（javbus-plugin/edgeone-api），按标题 t 做大小写不敏感子串过滤，支持模糊搜索（输入部分片名即可命中）。JAVBUS 搜索框输入的关键词经 Uri.encodeComponent 编码后作为 q 传入；翻页由 total/pageSize 推导（pageSize=50 与 API 的 PAGE_SIZE 对齐）。空查询返回全量并按页浏览。数据项仅含 {i,t,s,d}，magnet 由 defaults 用 infoHash 现场拼装。"
 }
