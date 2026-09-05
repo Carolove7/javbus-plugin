@@ -1,18 +1,46 @@
 // 构建期写入「部署 commit SHA」到 cloud-functions/_ref.json，
 // 供 search.js 把 jsDelivr 数据源固定到该 SHA，避免 @master 的 CDN 滞后导致读到新旧混合分片。
-// 无网络依赖、不会失败；git 不可用时回退 master。该文件被 .gitignore 忽略（不入库，避免陈旧 SHA）。
+// 无网络依赖、不会失败；尽量取真实 SHA，git/仓库元数据不可用时回退 master。
+// 该文件被 .gitignore 忽略（不入库，避免陈旧 SHA）。
 import { execSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-let ref = 'master';
-try {
-  ref = execSync('git rev-parse HEAD', { cwd: __dirname, encoding: 'utf8' }).trim();
-} catch {
-  // 无 git 环境 -> 回退 master
+
+function getRef() {
+  // 1) git CLI（最常见）
+  try {
+    const r = execSync('git rev-parse HEAD', { cwd: __dirname, encoding: 'utf8' }).trim();
+    if (/^[0-9a-f]{40}$/.test(r)) return r;
+  } catch {}
+  // 2) 直接读 .git/HEAD（CI 一般是 checkout，git 目录存在）
+  try {
+    const headPath = path.join(__dirname, '.git', 'HEAD');
+    if (fs.existsSync(headPath)) {
+      const head = fs.readFileSync(headPath, 'utf8').trim();
+      if (head.startsWith('ref:')) {
+        const ref = head.slice(4).trim();
+        const refPath = path.join(__dirname, '.git', ref);
+        if (fs.existsSync(refPath)) return fs.readFileSync(refPath, 'utf8').trim();
+        // packed-refs
+        const packed = path.join(__dirname, '.git', 'packed-refs');
+        if (fs.existsSync(packed)) {
+          for (const line of fs.readFileSync(packed, 'utf8').split('\n')) {
+            const sp = line.indexOf(' ');
+            if (sp > 0 && line.slice(sp + 1).trim() === ref) return line.slice(0, sp).trim();
+          }
+        }
+      } else if (/^[0-9a-f]{40}$/.test(head)) {
+        return head; // detached HEAD
+      }
+    }
+  } catch {}
+  return 'master';
 }
+
+const ref = getRef();
 const out = path.join(__dirname, 'cloud-functions', '_ref.json');
 fs.writeFileSync(out, JSON.stringify({ ref, branch: 'master' }));
 console.log(`[build_ref] wrote ${out} ref=${ref}`);
