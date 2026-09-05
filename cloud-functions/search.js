@@ -212,9 +212,20 @@ async function fetchShards(type) {
 }
 
 // 载入 items 后统一构建 lowers + 倒排索引
+// 搜索文本 lowers = 标题 t + 备注 remarks + 标签 tags 的拼接小写（combined）。
+// 关键：原盘(yuanpan) 标题 t 是英文 BluRay 发行名（A.Taxi.Driver.2017...），中文片名只在 remarks
+// （出租车司机 택시 운전사 (2017)）。必须把 remarks/tags 纳入 lowers，中文查询才能命中原盘——
+// 这正是用户体感「原盘搜不到」的根因。倒排索引建在 combined lowers 上，确保 remarks 匹配也是候选。
+// 代价：combined 索引约 37.6M postings（~144MB）可能超过函数内存预算（SEARCH_INDEX_MAX_MB 默认 128），
+// 此时 buildIndex 自动回退 null，searchIndexed 转全扫描（结果仍正确，仅稍慢）。小内存函数安全回退，
+// 大内存函数则享受快速倒排。两处回退（索引缺失 / 倒排无候选）都走 searchScan，保证不漏匹配。
 function finalizeData(items) {
   const lowers = new Array(items.length);
-  for (let i = 0; i < items.length; i++) lowers[i] = (items[i].t || '').toLowerCase();
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i];
+    const tags = Array.isArray(it.tags) ? it.tags.join(' ') : '';
+    lowers[i] = `${it.t || ''} ${it.remarks || ''} ${tags}`.toLowerCase();
+  }
   let index = null;
   if (USE_INDEX()) index = buildIndex(lowers);
   return { items, lowers, index };
@@ -339,7 +350,9 @@ export function searchIndexed(data, q, page) {
   // 单字查询（len<2）或索引缺失 -> 回退全扫描
   if (!index || ql.length < 2) return searchScan(data, ql, p, start);
   const cands = intersect(index, ql);
-  if (cands === null) return { items: [], total: 0 };
+  // 倒排无候选：标题里没有该查询的任何二元组（典型如纯中文、仅出现在 remarks 的原盘条目），
+  // 回退全扫描（基于 combined lowers，含 remarks/tags）以保证不漏匹配。
+  if (cands === null) return searchScan(data, ql, p, start);
   const need = p * PAGE_SIZE;
   const heap = new BoundedMinHeap(need);
   let total = 0;
