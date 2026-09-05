@@ -241,18 +241,84 @@ function sendJson(obj, status = 200) {
   });
 }
 
+function pickDetailTool(tools) {
+  const kw = ['detail', 'info', 'metadata', 'resource', '资源', '详情', '信息'];
+  for (const k of kw) {
+    const hit = tools.find((t) =>
+      (t.name || '').toLowerCase().includes(k) || (t.description || '').toLowerCase().includes(k));
+    if (hit) return hit;
+  }
+  return null;
+}
+
+// 从详情响应里抽取文件列表（多键兼容）
+function extractFiles(raw) {
+  let arr = null;
+  if (Array.isArray(raw)) arr = raw;
+  else if (raw && typeof raw === 'object') {
+    for (const k of ['files', 'fileList', 'list', 'data', 'items', 'resources', 'torrents']) {
+      if (Array.isArray(raw[k])) { arr = raw[k]; break; }
+    }
+    if (!arr) for (const v of Object.values(raw)) { if (Array.isArray(v)) { arr = v; break; } }
+  }
+  if (!arr) return [];
+  const NAME_KEYS = ['name', 'title', 'filename', 'fileName', 'path', 'text'];
+  const SIZE_KEYS = ['size', 'length', 'fileSize', 'filesize', 'humanSize', 's'];
+  return arr.map((f) => {
+    if (typeof f === 'string') return { name: f, size: '' };
+    const name = NAME_KEYS.map((k) => f[k]).find((v) => v != null && String(v).trim() !== '') || '';
+    const size = SIZE_KEYS.map((k) => f[k]).find((v) => v != null && String(v).trim() !== '') || '';
+    return { name: String(name), size: String(size) };
+  });
+}
+
+// GET /mg?op=detail&hash=<infoHash>  —— 拉取单资源详情（magnet + 文件列表）
+async function doDetail(hash) {
+  const tools = await listTools();
+  const tool = pickDetailTool(tools) || pickTool(tools);
+  if (!tool) throw new Error('MCP 服务器未暴露可用工具（tools/list 为空）');
+  const lowerNames = Object.keys((tool.inputSchema && tool.inputSchema.properties) || {}).map((n) => n.toLowerCase());
+  const hashParam = lowerNames.find((n) => ['infohash', 'hash', 'id', 'btih', 'ih'].includes(n)) || null;
+  const args = {};
+  if (hashParam) args[hashParam] = hash;
+  else args[pickQueryParam(tool)] = hash; // 回退：当 query 搜
+  const r = await rpc('tools/call', { name: tool.name, arguments: args }, 4);
+  let text = '';
+  if (r && Array.isArray(r.content)) text = r.content.map((c) => c.text || (c.data ? JSON.stringify(c.data) : '')).join('');
+  else if (typeof r === 'string') text = r;
+  else if (r && r.result) text = typeof r.result === 'string' ? r.result : JSON.stringify(r.result);
+  if (r && r.isError) throw new Error(`MCP tool ${tool.name} returned error: ${text.slice(0, 300)}`);
+  let parsed;
+  try { parsed = JSON.parse(text); } catch { parsed = text; }
+  const items = normalizeItems(parsed);
+  const item = items[0] || {};
+  const files = extractFiles(parsed);
+  return {
+    infoHash: item.i, title: item.t, magnet: item.m, size: item.s, files,
+    raw: parsed, tool: { name: tool.name, inputSchema: tool.inputSchema },
+  };
+}
+
 export async function onRequestGet(context) {
   try {
     const u = new URL(context.request.url);
     const op = u.searchParams.get('op');
+    const dbg = u.searchParams.get('debug');
     if (op === 'tools') {
       if (!MCP_TOKEN) return sendJson({ error: 'MG_MCP_TOKEN 未配置（请在 EdgeOne 项目环境变量中设置）' }, 500);
       const tools = await listTools();
       return sendJson({ url: MCP_URL, toolCount: tools.length, tools });
     }
+    if (op === 'detail') {
+      if (!MCP_TOKEN) return sendJson({ error: 'MG_MCP_TOKEN 未配置（请在 EdgeOne 项目环境变量中设置）' }, 500);
+      const hash = u.searchParams.get('hash') || u.searchParams.get('q') || '';
+      const res = await doDetail(hash);
+      if (dbg) return sendJson(res);
+      const { infoHash, title, magnet, size, files } = res;
+      return sendJson({ infoHash, title, magnet, size, files });
+    }
     const q = u.searchParams.get('q') || '';
     const page = Math.max(1, parseInt(u.searchParams.get('page') || '1', 10) || 1);
-    const dbg = u.searchParams.get('debug');
     if (!MCP_TOKEN) {
       return sendJson({ error: 'MG_MCP_TOKEN 未配置（请在 EdgeOne 项目环境变量中设置）' }, 500);
     }

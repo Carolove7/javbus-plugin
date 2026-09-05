@@ -18,10 +18,11 @@
     "infoHash": "i",
     "magnet": "m",
     "humanSize": "s",
-    "createdAt": "d"
+    "createdAt": "d",
+    "lastSeen": "d"
   },
   "defaults": {
     "magnet": "magnet:?xt=urn:btih:{infoHashUpper}"
   },
-  "_comment": "剧集库+影视库 合并搜索版（单一插件）。后端为已绑定自定义域名 mg.147771.xyz 的 EdgeOne Makers 服务（javbus-plugin 仓库根目录），/search 端点同时检索剧集(115409)与影视(58175)，按标题 t 做大小写不敏感子串过滤并按匹配位置排序（startsWith 优先）。JAVBUS 搜索框关键词经 Uri.encodeComponent 编码为 q 传入；翻页由 total/pageSize 推导（pageSize=50）。空查询返回全量并按页浏览。数据项仅含 {i,t,s,d}，magnet 由 defaults 用 infoHash 现场拼装。"
+  "_comment": "剧集库+影视库合并搜索（单一插件）。后端为已绑定自定义域名 mg.147771.xyz 的 EdgeOne Makers 服务（javbus-plugin 仓库根目录），/search 端点返回 {items:[{i,t,s,d}],total}。本源（静态索引 index/）仅含 infoHash/标题/大小/日期，故 fields 只映射这些；协议标准字段中的 size(字节数)/seeders/leechers/score/health/verified/webUrl 等本源无数据，未声明。magnet 由 defaults 用 infoHash 现场拼装（magnet:?xt=urn:btih:{infoHashUpper}）。本源为静态索引、无详情页，故未配 detail endpoint（详情补全能力见 mg-plugin.json）。"
 }

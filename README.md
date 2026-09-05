@@ -87,6 +87,18 @@ javbus-plugin/                 # 仓库根目录即 Makers 项目根目录
 | `PAGE_SIZE` | `50` | 每页条数 |
 | `MG_MCP_TOKEN` | — | `/mg` 需要；`/search` 不需要 |
 
+### 详情补全（detail endpoint）
+
+`mg-plugin.json` 额外配了 `detail` endpoint。在客户端点进某条结果时，会请求：
+
+```
+GET /mg?op=detail&hash=<infoHash>
+```
+
+由 `cloud-functions/mg.js` 的 `doDetail` 调用 kiteyuan MCP 的详情工具（未暴露详情工具时回退用搜索工具传 hash 取首条），返回该资源的 `magnet` 与文件列表 `files:[{name,size}]`，文件列表由插件的 `fileFields` 映射。调试真实结构：`/mg?op=detail&hash=<hash>&debug=1`。
+
+> 注：`ys-plugin.json`（/search 静态索引源）只含 `infoHash/标题/大小/日期`，无详情/文件列表，故未启用 `detail`。
+
 ## 五、部署
 
 ### 方式一：原生连接 GitHub（推荐，一键部署）
