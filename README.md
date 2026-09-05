@@ -2,7 +2,7 @@
 
 把本地影视磁力索引接入 JAVBUS 客户端，作为一个可按关键词**模糊搜索**的私有数据源。
 
-- **数据规模**：184,120 条（剧集 115,409 + 影视 63,443 + 原盘 5,268，合并）
+- **数据规模**：178,852 条（剧集 115,409 + 影视 58,175 + 原盘 5,268，合并）
 - **部署平台**：EdgeOne Makers（Cloud Functions，非常驻服务）
 - **公网入口**：`https://mg.147771.xyz`（需自行绑定域名，见文末「部署后必做」）
 
@@ -38,7 +38,7 @@ https://raw.githubusercontent.com/Carolove7/javbus-plugin/master/mg-plugin.json
       "m": "magnet:?xt=urn:btih:<infoHash>",
       "files": [ { "name": "<文件名>", "size": "<大小>", "magnet": "<磁力链>", "infoHash": "<infoHash>" } ] }
   ],
-  "total": 184120
+  "total": 178852
 }
 ```
 
@@ -70,7 +70,7 @@ javbus-plugin/                 # 仓库根目录即 Makers 项目根目录
 
 ## 四、工作原理
 
-- `index/` 是数据源（186 个分片）。运行时从 jsDelivr 拉取分片合并，内存拼成全集（冷启动约 6s，实例复用）。
+- `index/` 是数据源（181 个分片：yingshi 59 + juji 116 + yuanpan 6）。运行时从 jsDelivr 拉取分片合并，内存拼成全集（冷启动约 6s，实例复用）。
 - 加载期构建 **bigram（二元组）倒排索引**（紧凑 `Int32Array` 存储）：查询先用索引交集收窄候选集，再仅对候选做精确 `indexOf` 校验与「匹配位置」排序。单字查询 / 索引不可用时自动回退全扫描。
 
 ### 性能（18.4 万条实测）
