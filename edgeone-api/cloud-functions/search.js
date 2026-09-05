@@ -15,7 +15,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PAGE_SIZE = Math.max(1, Number(process.env.PAGE_SIZE || 50));
 const DATA_DIR = path.join(__dirname, '_data');
 
-const REPO = 'Carolove7/javbus-juji-plugin';
+const REPO = 'Carolove7/javbus-plugin';
 const BRANCH = 'master';
 const SOURCES = [
   `https://cdn.jsdelivr.net/gh/${REPO}@${BRANCH}`,

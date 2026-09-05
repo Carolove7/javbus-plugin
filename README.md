@@ -6,10 +6,14 @@
 
 ## 安装插件（JAVBUS 客户端）
 
-在「数据源 / JSON 插件」里添加，URL 填：
+在「数据源 / JSON 插件」里添加，URL 需以 `.json` 结尾，可直接用本仓库根目录的 raw 地址：
 
 ```
-https://raw.githubusercontent.com/Carolove7/javbus-juji-plugin/master/javbus-plugin.json
+# 影视库搜索（剧集 + 影视合并，走 /search）
+https://raw.githubusercontent.com/Carolove7/javbus-plugin/master/ys-plugin.json
+
+# 磁力·kiteyuan（经 /mg 桥接调用 magnet.kiteyuan.info 的 MCP，走 /mg）
+https://raw.githubusercontent.com/Carolove7/javbus-plugin/master/mg-plugin.json
 ```
 
 安装后在搜索框输入**任意部分片名**即可模糊搜索（大小写不敏感、子串匹配）。
@@ -20,7 +24,8 @@ https://raw.githubusercontent.com/Carolove7/javbus-juji-plugin/master/javbus-plu
 
 | 端点 | 说明 |
 |------|------|
-| `GET /search?q=<词>&page=<n>` | 剧集 + 影视合并搜索（插件用这个） |
+| `GET /search?q=<词>&page=<n>` | 剧集 + 影视合并搜索（ys-plugin.json 用这个） |
+| `GET /mg?q=<词>&page=<n>`     | 经桥接函数调用 magnet.kiteyuan.info 的 MCP（mg-plugin.json 用这个） |
 | `GET /health`                 | 健康检查 |
 
 返回格式：
@@ -36,7 +41,7 @@ https://raw.githubusercontent.com/Carolove7/javbus-juji-plugin/master/javbus-plu
 
 ```
 javbus-plugin/
-├── javbus-plugin.json      # 合并插件（指向 mg.147771.xyz）
+├── ys-plugin.json          # 合并插件（指向 mg.147771.xyz）
 ├── edgeone-api/            # EdgeOne Makers 搜索服务（Cloud Functions）
 │   ├── cloud-functions/    # 部署为函数：search.js→/search, health.js→/health, index.js→/
 │   ├── build_data.js       # 合并 index/ 分片

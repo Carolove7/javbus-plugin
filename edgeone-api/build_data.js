@@ -14,7 +14,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..'); // javbus-plugin/
 const OUT_DIR = path.join(__dirname, 'cloud-functions', '_data');
 
-const REPO = 'Carolove7/javbus-juji-plugin';
+const REPO = 'Carolove7/javbus-plugin';
 const BRANCH = 'master';
 const SOURCES = [
   `https://cdn.jsdelivr.net/gh/${REPO}@${BRANCH}`,
