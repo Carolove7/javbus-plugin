@@ -1,5 +1,7 @@
 # 合并索引分片由 build_data.js 在构建期生成（不进 git；函数运行时从 jsDelivr 拉取 index/ 分片合并，已验证可用）
 cloud-functions/_data/
+# 构建期写入的部署 commit SHA（供 search.js 固定 jsDelivr 数据源，避免 @master CDN 滞后）；不入库，避免陈旧 SHA
+cloud-functions/_ref.json
 node_modules/
 # EdgeOne Makers 部署产物 / 本地环境（非源码；远端构建会自行重建 .edgeone）
 .edgeone/

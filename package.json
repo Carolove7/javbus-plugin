@@ -5,7 +5,7 @@
   "type": "module",
   "description": "JAVBUS 关键词搜索适配服务 (EdgeOne)",
   "scripts": {
-    "build": "node -e \"console.log('[build] search function fetches index/ shards at runtime (1.57GB > 128MB code-package limit, cannot be bundled); skipping _data generation — see build_data.js if local _data is ever needed')\"",
+    "build": "node build_ref.mjs",
     "builddata": "node build_data.js"
   },
   "engines": {

@@ -15,6 +15,7 @@
 //  3) 模块级 query 结果缓存（LRU 上限）：热门/重复搜索直接命中，跳过扫描。
 //  4) 索引构建 OOM 安全：失败则自动回退到全扫描模式，不影响服务可用性。
 import { readFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -24,9 +25,20 @@ const DATA_DIR = path.join(__dirname, '_data');
 
 const REPO = 'Carolove7/javbus-plugin';
 const BRANCH = 'master';
+// 数据源固定到「部署时写入的 commit SHA」(cloud-functions/_ref.json)，而非 @master。
+// 原因：jsDelivr 对 @master 存在 CDN 滞后，曾观测到线上函数读到新旧混合/滞后的分片
+//（如 yingshi 远程 62618 而本地 63443），导致某些分类搜不到。固定到部署 commit 可保证
+// 函数永远读到与代码同版本的新鲜数据；_ref.json 缺失时回退 @master（本地/未构建环境）。
+let REF = BRANCH;
+try {
+  const refObj = JSON.parse(readFileSync(path.join(__dirname, '_ref.json'), 'utf8'));
+  if (refObj && refObj.ref) REF = refObj.ref;
+} catch {
+  // 无 _ref.json -> 回退 @master
+}
 const SOURCES = [
-  `https://cdn.jsdelivr.net/gh/${REPO}@${BRANCH}`,
-  `https://raw.githubusercontent.com/${REPO}/${BRANCH}`,
+  `https://cdn.jsdelivr.net/gh/${REPO}@${REF}`,
+  `https://raw.githubusercontent.com/${REPO}/${REF}`,
 ];
 
 // 单实例内结果缓存上限，超过则淘汰最旧条目
@@ -220,8 +232,9 @@ async function loadData() {
       fetchShards('yuanpan'),
     ]);
     const items = [...juji, ...yingshi, ...yuanpan];
-    console.log(`[load] all: ${items.length} items (remote)`);
+    console.log(`[load] all: ${items.length} items (remote, ref=${REF}) juji=${juji.length} yingshi=${yingshi.length} yuanpan=${yuanpan.length}`);
     DATA = finalizeData(items);
+    DATA.catCounts = { juji: juji.length, yingshi: yingshi.length, yuanpan: yuanpan.length, ref: REF };
     return DATA;
   })();
   try {
@@ -363,6 +376,7 @@ export async function onRequestGet(context) {
     const u = new URL(context.request.url);
     const q = u.searchParams.get('q') || '';
     const page = u.searchParams.get('page') || '1';
+    const debug = u.searchParams.get('debug') === '1';
     const key = `${q}|${page}`;
 
     const hit = queryCache.get(key);
@@ -370,6 +384,7 @@ export async function onRequestGet(context) {
 
     const data = await loadData();
     const out = search(data, q, page);
+    if (debug && data.catCounts) out.debug = data.catCounts;
 
     if (queryCache.size >= QCACHE_MAX) queryCache.delete(queryCache.keys().next().value);
     queryCache.set(key, out);
