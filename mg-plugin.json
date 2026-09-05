@@ -29,7 +29,7 @@
     "lastSeen": "d"
   },
   "fileFields": {
-    "name": "name",
+    "path": "name",
     "humanSize": "size"
   },
   "defaults": {

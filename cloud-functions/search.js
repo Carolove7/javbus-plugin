@@ -380,5 +380,5 @@ export async function onRequestGet(context) {
   }
 }
 
-// 导出内部构件（供基准/测试复用）
-export { buildIndex, intersect, finalizeData, bigramsOf };
+// 导出内部构件（供基准/测试复用；detail.js 复用 loadData 以共用同一数据源）
+export { buildIndex, intersect, finalizeData, bigramsOf, loadData };

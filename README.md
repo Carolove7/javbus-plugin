@@ -2,7 +2,7 @@
 
 把本地影视磁力索引接入 JAVBUS 客户端，作为一个可按关键词**模糊搜索**的私有数据源。
 
-- **数据规模**：173,584 条（剧集 + 影视合并）
+- **数据规模**：178,852 条（剧集 115,409 + 影视 63,443，合并）
 - **部署平台**：EdgeOne Makers（Cloud Functions，非常驻服务）
 - **公网入口**：`https://mg.147771.xyz`（需自行绑定域名，见文末「部署后必做」）
 
@@ -25,17 +25,25 @@ https://raw.githubusercontent.com/Carolove7/javbus-plugin/master/mg-plugin.json
 | 端点 | 说明 |
 |------|------|
 | `GET /search?q=<词>&page=<n>` | 剧集 + 影视合并搜索（ys-plugin.json 用） |
+| `GET /detail?hash=<infoHash>` | 按 infoHash 返回完整磁力链 + 文件列表（ys-plugin.json 的 detail endpoint 用） |
 | `GET /mg?q=<词>&page=<n>`     | 桥接 magnet.kiteyuan.info 的 MCP（mg-plugin.json 用） |
 | `GET /health`                 | 健康检查 |
 
-返回格式：
+`/search` 返回格式（每条目已内嵌完整磁力链 `m` 与文件清单 `files`）：
 
 ```json
-{ "items": [ { "i": "<infoHash>", "t": "<标题>", "s": "<大小>", "d": "<日期>" } ], "total": 173584 }
+{
+  "items": [
+    { "i": "<infoHash>", "t": "<标题>", "s": "<大小>", "d": "<日期>",
+      "m": "magnet:?xt=urn:btih:<infoHash>",
+      "files": [ { "name": "<文件名>", "size": "<大小>", "magnet": "<磁力链>", "infoHash": "<infoHash>" } ] }
+  ],
+  "total": 178852
+}
 ```
 
 - `q` 为空 → 全量按页浏览（默认每页 50）；`q` 非空 → 标题子串匹配，按匹配位置排序。
-- `magnet` 不入库，由插件用 `infoHash` 拼装 `magnet:?xt=urn:btih:{infoHashUpper}`。
+- 分片由 `影视.json` / `剧集.json` 桌面数据**扁平化重建**，每条目已带完整 `magnet`（`m` 字段），`defaults.magnet` 仅作兜底；`files` 为该作品的全部文件/多版本清单（约 91% 为多文件）。
 
 ## 三、目录结构
 
@@ -48,13 +56,14 @@ javbus-plugin/                 # 仓库根目录即 Makers 项目根目录
 ├── .nvmrc                  # Node 20
 ├── cloud-functions/        # 部署为函数
 │   ├── search.js           # → /search
+│   ├── detail.js           # → /detail（按 hash 返回磁力链 + 文件列表）
 │   ├── health.js           # → /health
 │   ├── mg.js               # → /mg
 │   ├── index.js            # → /
 │   ├── _test_index.mjs     # 倒排索引 vs 全扫描等价性测试（全 PASS）
 │   ├── _bench_real.mjs     # 真实数据基准（含内存）
 │   └── _data/              # build_data.js 产出（gitignored，不进函数包）
-└── index/                  # 静态分片索引（数据源，175 片）
+└── index/                  # 静态分片索引（数据源，180 片：yingshi 64 + juji 116）
 ```
 
 > 函数目录必须放在**项目根目录**下，Makers 才会触发 `Node functions build`；否则只产出空静态站、所有路由 404。
@@ -89,15 +98,21 @@ javbus-plugin/                 # 仓库根目录即 Makers 项目根目录
 
 ### 详情补全（detail endpoint）
 
-`mg-plugin.json` 额外配了 `detail` endpoint。在客户端点进某条结果时，会请求：
+两个插件都配了 `detail` endpoint，点进某条结果时在客户端侧补全磁力链与文件列表（协议要求文件列表只能经 `detail` 返回，搜索结果内联 `files` 不被客户端识别）。
+
+**1. 静态库 `ys-plugin.json`（/search 源）** —— 新增 `GET /detail?hash=<infoHash>`：
 
 ```
-GET /mg?op=detail&hash=<infoHash>
+GET /detail?hash=<infoHash>
 ```
+
+由 `cloud-functions/detail.js` 按大写 `infoHash` 查静态索引，返回该条完整对象（含 `m` 磁力链与 `files` 文件清单）；`fileFields` 映射 `path=name`、`humanSize=size`。静态分片扁平化时已内嵌 `files`，故无需外部调用即可列出该作品的全部文件/多版本。
+
+**2. 磁力桥接 `mg-plugin.json`（/mg 源）** —— `GET /mg?op=detail&hash=<infoHash>`：
 
 由 `cloud-functions/mg.js` 的 `doDetail` 调用 kiteyuan MCP 的详情工具（未暴露详情工具时回退用搜索工具传 hash 取首条），返回该资源的 `magnet` 与文件列表 `files:[{name,size}]`，文件列表由插件的 `fileFields` 映射。调试真实结构：`/mg?op=detail&hash=<hash>&debug=1`。
 
-> 注：`ys-plugin.json`（/search 静态索引源）只含 `infoHash/标题/大小/日期`，无详情/文件列表，故未启用 `detail`。
+> 两插件 `fileFields` 的键名遵循协议 v1：`path`（文件名）、`humanSize`（人类可读大小）。
 
 ## 五、部署
 
