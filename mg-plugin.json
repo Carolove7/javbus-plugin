@@ -10,7 +10,7 @@
     "responseType": "json",
     "itemsPath": "items",
     "totalPath": "total",
-    "pageSize": 20
+    "pageSize": 50
   },
   "detail": {
     "method": "GET",

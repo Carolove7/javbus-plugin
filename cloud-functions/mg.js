@@ -11,9 +11,7 @@
 //   MG_MCP_TOOL         指定搜索工具名；缺省时按名称/描述自动探测（含 search/magnet/query/磁力/搜索…）
 //   MG_MCP_QUERY_PARAM  传给工具的查询参数名；缺省时按 schema 自动猜测 (q/query/keyword/name/text…)
 //   MG_MCP_PAGE_PARAM   分页参数名；缺省时按 schema 自动猜测 (page/pageNum/p/offset)；猜不到则不传
-//   MG_MCP_LIMIT_PARAM  返回条数参数名；缺省时按 schema 自动猜测 (limit/size/count/num…)
-//   MG_MCP_LIMIT        固定返回条数（覆盖自动推断）；0=自动取服务端上限与 PAGE_SIZE 的较小值
-//   PAGE_SIZE           默认 50（当搜索工具无服务端分页时，实际返回数受服务端 limit 上限约束，如 kiteyuan 上限 20）
+//   PAGE_SIZE           默认 50
 //
 // 传输：MCP streamable HTTP。自动处理 SSE(text/event-stream) 与纯 JSON 两种响应，
 // 并复用 Mcp-Session-Id；会话失效(404/会话不存在)时自动重新 initialize 重试一次。
@@ -65,13 +63,6 @@ async function rpc(method, params, id, retry = true) {
   if (sid) sessionId = sid;
   const ct = res.headers.get('content-type') || '';
   const text = await res.text();
-  // 偶发：服务端冷启动/网关抖动时返回 HTML 错误页而非 JSON，
-  // 直接 JSON.parse 会抛 "Unexpected token '<'"。重连会话后重试一次。
-  if (retry && /^<!doctype|<html/i.test(text.trim())) {
-    sessionId = null;
-    await ensureInitialized();
-    return rpc(method, params, id, false);
-  }
   const data = parseBody(ct, text);
   if (!res.ok) {
     // 会话失效 → 重新初始化后重试一次
@@ -138,26 +129,6 @@ function pickPageParam(tool) {
     if (names.includes(c)) return c;
   }
   return null;
-}
-
-// 探测「返回条数」参数（limit / size / count / num / topK …）；缺省时按 schema 自动猜测
-function pickLimitParam(tool) {
-  if (process.env.MG_MCP_LIMIT_PARAM) return process.env.MG_MCP_LIMIT_PARAM;
-  const names = Object.keys((tool && tool.inputSchema && tool.inputSchema.properties) || {}).map((n) => n.toLowerCase());
-  for (const c of ['limit', 'size', 'count', 'num', 'pagesize', 'perpage', 'rowcount', 'topk', 'top_n', 'n', 'max']) {
-    if (names.includes(c)) return c;
-  }
-  return null;
-}
-
-// 从 schema description（"返回条数，默认 7，最大 20"）或 schema.maximum 解析服务端条数上限
-function detectMaxLimit(tool) {
-  const desc = (tool && tool.description) || '';
-  const m = desc.match(/最大\s*(\d+)/);
-  if (m) return Number(m[1]);
-  const prop = (tool && tool.inputSchema && tool.inputSchema.properties && tool.inputSchema.properties.limit) || {};
-  if (typeof prop.maximum === 'number') return prop.maximum;
-  return 20; // 保守默认上限
 }
 
 // 兼容多种顶层数组键（不同 MCP 返回结构不同）
@@ -232,17 +203,8 @@ async function doSearch(q, page) {
   if (!tool) throw new Error('MCP 服务器未暴露可用工具（tools/list 为空）');
   const qParam = pickQueryParam(tool);
   const pParam = pickPageParam(tool);
-  const lParam = pickLimitParam(tool);
   const args = { [qParam]: q };
   if (pParam) args[pParam] = page;
-  // 主动声明返回条数：多数 MCP 搜索工具有默认下限（如默认 7）且不支持 page 分页，
-  // 不传 limit 就会「每次只返回 7 条」。取服务端上限与 PAGE_SIZE 的较小值。
-  if (lParam) {
-    const cap = detectMaxLimit(tool);
-    const envLimit = Number(process.env.MG_MCP_LIMIT || 0);
-    const want = envLimit > 0 ? envLimit : Math.min(PAGE_SIZE, cap);
-    args[lParam] = Math.max(1, Math.min(want, cap));
-  }
   const r = await rpc('tools/call', { name: tool.name, arguments: args }, 3);
   // r = { content:[{type,text}], isError } 或 { result }
   let text = '';
@@ -257,15 +219,7 @@ async function doSearch(q, page) {
   let parsed;
   try { parsed = JSON.parse(text); } catch { parsed = text; }
   const items = normalizeItems(parsed);
-  // total 取值：若服务端支持 page 分页，用真实 total/count（可能大于本页）；
-  // 若不支持分页（无 page 参数），total 即本次返回数，否则会制造空白的第 2 页。
-  let total;
-  if (pParam) {
-    const rt = (parsed && (parsed.total != null ? parsed.total : (parsed.count != null ? parsed.count : null)));
-    total = (rt != null) ? rt : items.length;
-  } else {
-    total = items.length;
-  }
+  const total = (parsed && parsed.total != null) ? parsed.total : items.length;
   const start = (page - 1) * PAGE_SIZE;
   const pageItems = items.slice(start, start + PAGE_SIZE);
   return {
