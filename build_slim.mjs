@@ -1,8 +1,4 @@
-// 从 index/ 全量分片生成「精简搜索数据集」index-slim/：
-// 仅保留搜索与返回所需字段 {i,t,s,d,m,remarks,tags}，丢弃庞大的 files 数组
-// （550 万条文件，占全量 2.3GB 内存的绝大部分）。
-// 这样 /search 运行时只需加载 ~73MB（而非 1.57GB 解析出 2.3GB），避免 Cloud Function OOM/超时 500。
-// 注意：每当重建 index/ 分片后，必须同步重新运行本脚本，否则 index-slim/ 会滞后于 index/。
+// Build index-slim: (1) slim shards from index/ (drop the huge files array), (2) search.json compact index.
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -10,20 +6,21 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SRC = path.join(__dirname, 'index');
 const DST = path.join(__dirname, 'index-slim');
-const cats = ['yingshi', 'juji', 'yuanpan'];
+const CATS = ['juji', 'yingshi', 'yuanpan'];
+const CATIDX = { juji: 0, yingshi: 1, yuanpan: 2 };
 const MAX = 250;
+const SEP = '\u0000';
 
 function itemsOf(obj) { return Array.isArray(obj) ? obj : (obj && Array.isArray(obj.items) ? obj.items : []); }
 
-let total = 0, totalBytes = 0;
-const t0 = Date.now();
-for (const cat of cats) {
+// Step 1: regenerate slim shards from full index/ (drop files to keep them tiny)
+for (const cat of CATS) {
   const sdir = path.join(SRC, cat);
   const ddir = path.join(DST, cat);
   fs.mkdirSync(ddir, { recursive: true });
   for (let n = 1; n <= MAX; n++) {
     const sf = path.join(sdir, `${cat}-${n}.json`);
-    if (!fs.existsSync(sf)) { if (n === 1) console.log(`[warn] ${cat} 无分片`); break; }
+    if (!fs.existsSync(sf)) break;
     const arr = itemsOf(JSON.parse(fs.readFileSync(sf, 'utf8')));
     const slim = arr.map((it) => ({
       i: it.i,
@@ -34,16 +31,68 @@ for (const cat of cats) {
       remarks: it.remarks || '',
       tags: Array.isArray(it.tags) ? it.tags : [],
     }));
-    const out = JSON.stringify(slim);
-    fs.writeFileSync(path.join(ddir, `${cat}-${n}.json`), out);
-    total += slim.length;
-    totalBytes += out.length;
+    fs.writeFileSync(path.join(ddir, `${cat}-${n}.json`), JSON.stringify(slim));
   }
 }
-const sec = ((Date.now() - t0) / 1000).toFixed(1);
-console.log(`[slim] 生成完成: ${total} 条, 体积 ${(totalBytes / 1024 / 1024).toFixed(1)}MB, 用时 ${sec}s`);
+console.log('[slim] shards regenerated');
 
-// 校验：与 index/ 总数一致
-let srcTotal = 0;
-for (const cat of cats) for (let n = 1; n <= MAX; n++) { const sf = path.join(SRC, cat, `${cat}-${n}.json`); if (!fs.existsSync(sf)) break; srcTotal += itemsOf(JSON.parse(fs.readFileSync(sf, 'utf8'))).length; }
-console.log(`[check] index/ 总数=${srcTotal}  index-slim/ 总数=${total}  → ${srcTotal === total ? '一致 OK' : '不一致 !!!'}`);
+// Step 2: build search.json from the slim shards
+function shardFiles(cat) {
+  const dir = path.join(DST, cat);
+  return fs.readdirSync(dir).filter((f) => f.endsWith('.json')).sort((a, b) => {
+    const na = parseInt(a.match(/-(\d+)\.json$/)[1], 10);
+    const nb = parseInt(b.match(/-(\d+)\.json$/)[1], 10);
+    return na - nb;
+  });
+}
+
+const textParts = [];
+const bounds = [];
+const catArr = [];
+const shardArr = [];
+const itemIdxArr = [];
+const hashes = [];
+const hashItem = [];
+const catCounts = { juji: 0, yingshi: 0, yuanpan: 0 };
+let offset = 0;
+let globalIndex = 0;
+
+for (const cat of CATS) {
+  for (const f of shardFiles(cat)) {
+    const n = parseInt(f.match(/-(\d+)\.json$/)[1], 10);
+    const arr = itemsOf(JSON.parse(fs.readFileSync(path.join(DST, cat, f), 'utf8')));
+    arr.forEach((it, idx) => {
+      const tags = Array.isArray(it.tags) ? it.tags.join(' ').slice(0, 40) : '';
+      const rem = String(it.remarks || '').slice(0, 80);
+      const t = String(it.t || '').slice(0, 120);
+      const lower = `${t} ${rem} ${tags}`.toLowerCase();
+      textParts.push(lower);
+      offset += lower.length + 1;
+      bounds.push(offset);
+      catArr.push(CATIDX[cat]);
+      shardArr.push(n);
+      itemIdxArr.push(idx);
+      hashes.push(String(it.i || '').toUpperCase());
+      hashItem.push(globalIndex);
+      catCounts[cat]++;
+      globalIndex++;
+    });
+  }
+}
+
+const text = textParts.join(SEP);
+const order = hashes.map((h, i) => i).sort((a, b) => (hashes[a] < hashes[b] ? -1 : hashes[a] > hashes[b] ? 1 : 0));
+// Store hashes as ONE fixed-width (40) concatenated string to slash per-string overhead (~16MB saved).
+const PW = 40;
+const hashStr = order.map((i) => hashes[i].slice(0, PW).padEnd(PW, '0')).join('');
+const sortedHashItem = order.map((i) => hashItem[i]);
+
+// Split into two files to avoid the ~3x JSON parse overhead on the giant text string:
+//  - search.meta.json: compact arrays + hash table (small, parsed as JSON)
+//  - search.text: raw UTF-8 text, decoded directly via Buffer (no JSON string escaping overhead)
+const meta = { total: globalIndex, bounds, cat: catArr, shard: shardArr, itemIdx: itemIdxArr, hashStr, hashItem: sortedHashItem, catCounts };
+fs.writeFileSync(path.join(DST, 'search.meta.json'), JSON.stringify(meta));
+fs.writeFileSync(path.join(DST, 'search.text'), Buffer.from(text, 'utf8'));
+const metaMB = (fs.statSync(path.join(DST, 'search.meta.json')).size / 1024 / 1024).toFixed(1);
+const textMB = (fs.statSync(path.join(DST, 'search.text')).size / 1024 / 1024).toFixed(1);
+console.log(`[search] ${globalIndex} items, meta=${metaMB}MB text=${textMB}MB, catCounts=${JSON.stringify(catCounts)}`);
