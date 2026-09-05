@@ -131,19 +131,69 @@ function pickPageParam(tool) {
   return null;
 }
 
+// 兼容多种顶层数组键（不同 MCP 返回结构不同）
+function extractArray(raw) {
+  if (Array.isArray(raw)) return raw;
+  if (raw && typeof raw === 'object') {
+    for (const k of ['items', 'results', 'result', 'list', 'data', 'magnets', 'records', 'hits', 'torrents', 'resources', 'rows', 'magnetList']) {
+      if (Array.isArray(raw[k])) return raw[k];
+    }
+    for (const v of Object.values(raw)) {
+      if (Array.isArray(v)) return v;
+    }
+  }
+  return raw ? [raw] : [];
+}
+
+// 从任意值里尽力抽出 btih（标准 urn:btih: 优先，其次 40/32 位 hex）
+function extractHash(thing) {
+  if (thing == null) return '';
+  const str = typeof thing === 'string' ? thing : JSON.stringify(thing);
+  let m = str.match(/btih:([a-z0-9]+)/i);
+  if (m) return m[1];
+  m = str.match(/\b([a-f0-9]{40})\b/i);
+  if (m) return m[1];
+  m = str.match(/\b([a-f0-9]{32})\b/i);
+  if (m) return m[1];
+  return '';
+}
+
+const HASH_KEYS = ['infoHash', 'infohash', 'info_hash', 'hash', 'btih', 'btihash', 'infoHashV1', 'sha1', 'magnetHash', 'ih'];
+const TITLE_KEYS = ['title', 'name', 'text', 't', 'filename', 'fileName', 'subject', 'topic', 'dn'];
+const SIZE_KEYS = ['size', 'humanSize', 's', 'length', 'fileSize', 'filesize', 'filesizeText'];
+const DATE_KEYS = ['date', 'createdAt', 'pubDate', 'd', 'time', 'publishDate', 'added', 'timestamp', 'publishTime'];
+
+function pick(it, keys) {
+  for (const k of keys) {
+    const v = it[k];
+    if (v != null && String(v).trim() !== '') return v;
+  }
+  return '';
+}
+
 function normalizeItems(raw) {
-  let arr = Array.isArray(raw) ? raw : (raw && raw.items ? raw.items : (raw ? [raw] : []));
-  if (!Array.isArray(arr)) arr = [];
+  const arr = extractArray(raw);
   return arr.map((it) => {
-    if (typeof it === 'string') it = { t: it };
-    const i = it.infoHash || it.hash || it.info_hash || it.btih || it.id ||
-      (it.magnet ? (it.magnet.match(/btih:([a-f0-9]+)/i) || [])[1] : '') || '';
-    const t = it.title || it.name || it.t || it.text || '';
-    const s = it.size || it.humanSize || it.s || '';
-    const d = it.date || it.createdAt || it.pubDate || it.d || '';
-    let m = it.magnet || '';
+    // 纯文本行：尝试按 magnet 链接切出 hash 与标题
+    if (typeof it === 'string') {
+      const h = extractHash(it);
+      const dn = (it.match(/[?&]dn=([^&]+)/i) || [])[1];
+      const t = dn ? decodeURIComponent(dn.replace(/\+/g, ' ')) : it.slice(0, 120);
+      return { i: h, t: String(t).trim(), s: '', d: '', m: h ? `magnet:?xt=urn:btih:${h.toUpperCase()}` : '' };
+    }
+    if (typeof it !== 'object' || it == null) return { i: '', t: String(it || ''), s: '', d: '', m: '' };
+    // infoHash：字段名优先，其次从各类 magnet/link 字段抽，最后整条记录兜底
+    const i = pick(it, HASH_KEYS)
+      || extractHash(it.magnet) || extractHash(it.magnetLink) || extractHash(it.magnet_url)
+      || extractHash(it.link) || extractHash(it.url) || extractHash(it);
+    const t = pick(it, TITLE_KEYS);
+    const s = pick(it, SIZE_KEYS);
+    const d = pick(it, DATE_KEYS);
+    // 直接可用的 magnet 字段
+    let m = it.magnet || it.magnetLink || it.magnet_url || it.link || it.url || '';
     if (!m && i) m = `magnet:?xt=urn:btih:${String(i).toUpperCase()}`;
-    return { i: String(i), t: String(t), s: String(s), d: String(d), m };
+    else if (m && !/^magnet:/i.test(m) && i) m = `magnet:?xt=urn:btih:${String(i).toUpperCase()}`;
+    return { i: String(i), t: String(t), s: String(s), d: String(d), m: String(m) };
   });
 }
 
@@ -172,7 +222,12 @@ async function doSearch(q, page) {
   const total = (parsed && parsed.total != null) ? parsed.total : items.length;
   const start = (page - 1) * PAGE_SIZE;
   const pageItems = items.slice(start, start + PAGE_SIZE);
-  return { items: pageItems, total: total || pageItems.length };
+  return {
+    items: pageItems,
+    total: total || pageItems.length,
+    raw: parsed,
+    tool: tool ? { name: tool.name, inputSchema: tool.inputSchema } : null,
+  };
 }
 
 function sendJson(obj, status = 200) {
@@ -197,10 +252,14 @@ export async function onRequestGet(context) {
     }
     const q = u.searchParams.get('q') || '';
     const page = Math.max(1, parseInt(u.searchParams.get('page') || '1', 10) || 1);
+    const dbg = u.searchParams.get('debug');
     if (!MCP_TOKEN) {
       return sendJson({ error: 'MG_MCP_TOKEN 未配置（请在 EdgeOne 项目环境变量中设置）' }, 500);
     }
-    return sendJson(await doSearch(q, page));
+    const res = await doSearch(q, page);
+    if (dbg) return sendJson(res);
+    const { items, total } = res;
+    return sendJson({ items, total });
   } catch (e) {
     return sendJson({ error: String((e && e.message) || e) }, 500);
   }
