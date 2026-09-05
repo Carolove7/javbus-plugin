@@ -251,19 +251,26 @@ function pickDetailTool(tools) {
   return null;
 }
 
-// 从详情响应里抽取文件列表（多键兼容）
+// 从详情响应里抽取文件列表（兼容嵌套在对象任意层级的 files/fileList/contents... 数组）
 function extractFiles(raw) {
-  let arr = null;
-  if (Array.isArray(raw)) arr = raw;
-  else if (raw && typeof raw === 'object') {
-    for (const k of ['files', 'fileList', 'list', 'data', 'items', 'resources', 'torrents']) {
-      if (Array.isArray(raw[k])) { arr = raw[k]; break; }
+  const KEYS = ['files', 'fileList', 'filelist', 'list', 'data', 'items', 'resources', 'torrents', 'contents', 'children', 'subfiles', 'fileInfos'];
+  const findArr = (obj) => {
+    if (Array.isArray(obj)) return obj;
+    if (obj && typeof obj === 'object') {
+      for (const k of KEYS) if (Array.isArray(obj[k])) return obj[k];
+      for (const v of Object.values(obj)) {
+        if (Array.isArray(v)) return v;
+        if (v && typeof v === 'object') {
+          for (const k of KEYS) if (Array.isArray(v[k])) return v[k];
+        }
+      }
     }
-    if (!arr) for (const v of Object.values(raw)) { if (Array.isArray(v)) { arr = v; break; } }
-  }
+    return null;
+  };
+  const arr = findArr(raw);
   if (!arr) return [];
-  const NAME_KEYS = ['name', 'title', 'filename', 'fileName', 'path', 'text'];
-  const SIZE_KEYS = ['size', 'length', 'fileSize', 'filesize', 'humanSize', 's'];
+  const NAME_KEYS = ['name', 'title', 'filename', 'fileName', 'path', 'text', 'file'];
+  const SIZE_KEYS = ['size', 'length', 'fileSize', 'filesize', 'humanSize', 's', 'bytes'];
   return arr.map((f) => {
     if (typeof f === 'string') return { name: f, size: '' };
     const name = NAME_KEYS.map((k) => f[k]).find((v) => v != null && String(v).trim() !== '') || '';
@@ -290,9 +297,13 @@ async function doDetail(hash) {
   if (r && r.isError) throw new Error(`MCP tool ${tool.name} returned error: ${text.slice(0, 300)}`);
   let parsed;
   try { parsed = JSON.parse(text); } catch { parsed = text; }
+  const arr = extractArray(parsed);
+  // 第一条原始记录（未归一化），文件列表常嵌套在 item 内部
+  const firstRaw = (arr[0] && typeof arr[0] === 'object') ? arr[0] : (parsed && typeof parsed === 'object' ? parsed : {});
   const items = normalizeItems(parsed);
   const item = items[0] || {};
-  const files = extractFiles(parsed);
+  // 优先从第一条原始记录提取文件列表（含嵌套），回退顶层
+  const files = extractFiles(firstRaw).length ? extractFiles(firstRaw) : extractFiles(parsed);
   return {
     infoHash: item.i, title: item.t, magnet: item.m, size: item.s, files,
     raw: parsed, tool: { name: tool.name, inputSchema: tool.inputSchema },

@@ -30,7 +30,6 @@
   },
   "fileFields": {
     "name": "name",
-    "size": "size",
     "humanSize": "size"
   },
   "defaults": {
