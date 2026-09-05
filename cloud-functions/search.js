@@ -1,7 +1,9 @@
 // GET /search?q=<关键词>&page=<n>
 // EdgeOne Cloud Function：合并剧集+影视+原盘全集（约 184120 条）载入内存，按标题 t 做大小写不敏感子串过滤，
 // 返回 JAVBUS 认识的 { items, total }，items 元素为 {i,t,s,d}。
-// 数据优先读同目录 _data/ 分片（随代码包部署）；缺失时回退到 jsDelivr 拉取 index/ 分片合并。
+// 数据始终从远程拉取最新提交的 index/ 分片合并（juji/yingshi/yuanpan 各分类目录下是 JSON 数组 [{...}]）。
+// 说明：全量约 1.57GB 远超函数代码包上限（128MB），无法随包上传，故运行时远程拉取是唯一可行路径；
+// 本地 _data/ 合并产物已废弃（仍被 .gitignore 忽略，且 build 脚本不再生成），解析统一走 itemsOf() 兼容数组/ {items:[]}。
 //
 // 性能优化要点（v2）：
 //  0) 加载期一次性预计算小写标题数组 `lowers`，搜索时不再对每个标题反复 toLowerCase()。
@@ -149,16 +151,15 @@ function intersect(index, ql) {
   return uniq;
 }
 
-async function readLocalChunks() {
-  const meta = JSON.parse(await readFile(path.join(DATA_DIR, 'all-meta.json'), 'utf8'));
-  const items = [];
-  for (let n = 1; n <= (meta.parts || 1); n++) {
-    const obj = JSON.parse(await readFile(path.join(DATA_DIR, `all-${n}.json`), 'utf8'));
-    items.push(...(obj.items || []));
-  }
-  return items;
+// 说明：不再优先读本地 _data 合并分片——构建产物可能过期、漏掉新增分类（如 yuanpan），
+// 导致 /search 搜不到原盘。改为始终从远程拉取最新提交的 index/ 分片合并（见 loadData）。
+// 分片格式兼容：index/ 分片是 JSON 数组 [{...}]，而历史合并产物 _data/all-*.json 是 { items:[...] }。
+// 统一用 itemsOf 解析，避免 obj.items 为 undefined 时静默取 0 条（这是「搜不到 yuanpan」的根因）。
+function itemsOf(obj) {
+  if (Array.isArray(obj)) return obj;
+  if (obj && Array.isArray(obj.items)) return obj.items;
+  return [];
 }
-
 // 兜底：并行批量从远程拉取 index/ 分片合并（分片连续编号，整批 404 即到末尾）
 async function fetchOne(type, n) {
   const rel = `index/${type}/${type}-${n}.json`;
@@ -168,7 +169,7 @@ async function fetchOne(type, n) {
       if (r.status === 404) return null;
       if (!r.ok) continue;
       const obj = await r.json();
-      return obj.items || [];
+      return itemsOf(obj);
     } catch {
       // 该源失败，尝试下一个
     }
@@ -211,20 +212,15 @@ async function loadData() {
   if (DATA) return DATA;
   if (loading) return loading;
   loading = (async () => {
-    let items;
-    try {
-      items = await readLocalChunks();
-      console.log(`[load] all: ${items.length} items (local chunks)`);
-    } catch (e) {
-      console.warn('[load] local chunks missing, fetching from remote:', e.message);
-      const [juji, yingshi, yuanpan] = await Promise.all([
-        fetchShards('juji'),
-        fetchShards('yingshi'),
-        fetchShards('yuanpan'),
-      ]);
-      items = [...juji, ...yingshi, ...yuanpan];
-      console.log(`[load] all: ${items.length} items (remote)`);
-    }
+    // 始终从远程拉取最新提交的 index/ 分片合并（含 juji/yingshi/yuanpan 各分类），
+    // 避免依赖可能过期的本地 _data，确保新增分类（原盘）也能被 /search 搜到。
+    const [juji, yingshi, yuanpan] = await Promise.all([
+      fetchShards('juji'),
+      fetchShards('yingshi'),
+      fetchShards('yuanpan'),
+    ]);
+    const items = [...juji, ...yingshi, ...yuanpan];
+    console.log(`[load] all: ${items.length} items (remote)`);
     DATA = finalizeData(items);
     return DATA;
   })();

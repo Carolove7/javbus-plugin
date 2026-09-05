@@ -25,6 +25,14 @@ const SOURCES = [
 // 每片目标大小（字节）。173584 条约 193 字节/条，16MB ≈ 8.4 万条，切成 3 片足够留余量。
 const CHUNK_BYTES = 16 * 1024 * 1024;
 
+// 分片格式兼容：index/ 分片是 JSON 数组 [{...}]，而历史合并产物 _data/all-*.json 是 { items:[...] }。
+// 统一用 itemsOf 解析，避免 obj.items 为 undefined 时静默取 0 条。
+function itemsOf(obj) {
+  if (Array.isArray(obj)) return obj;
+  if (obj && Array.isArray(obj.items)) return obj.items;
+  return [];
+}
+
 function localShards(type) {
   const dir = path.join(ROOT, 'index', type);
   if (!fs.existsSync(dir)) return null;
@@ -35,7 +43,7 @@ function localShards(type) {
   const items = [];
   for (const f of files) {
     const obj = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'));
-    items.push(...(obj.items || []));
+    items.push(...itemsOf(obj));
   }
   return items;
 }
@@ -62,7 +70,7 @@ async function fetchShards(type) {
       if (items.length > 0) return items; // 已拿到部分，遇空洞即视为结束
       throw new Error(`无法拉取 ${rel}（所有数据源均失败，可能网络受限）`);
     }
-    items.push(...(got.items || []));
+    items.push(...itemsOf(got));
     n++;
   }
   return items;
