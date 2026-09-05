@@ -1,5 +1,5 @@
 // GET /search?q=<关键词>&page=<n>
-// EdgeOne Cloud Function：合并剧集+影视+原盘全集（约 184120 条）载入内存，按标题 t 做大小写不敏感子串过滤，
+// EdgeOne Cloud Function：合并剧集+影视+原盘全集（约 184120 条）载入内存，按 `t`+`remarks`+`tags` 拼接文本做大小写不敏感子串过滤（中文片名在 remarks，必须纳入否则原盘搜不到），
 // 返回 JAVBUS 认识的 { items, total }，items 元素为 {i,t,s,d}。
 // 数据始终从远程拉取最新提交的 index/ 分片合并（juji/yingshi/yuanpan 各分类目录下是 JSON 数组 [{...}]）。
 // 说明：全量约 1.57GB 远超函数代码包上限（128MB），无法随包上传，故运行时远程拉取是唯一可行路径；
