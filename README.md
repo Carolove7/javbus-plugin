@@ -2,7 +2,7 @@
 
 把本地影视磁力索引接入 JAVBUS 客户端，作为一个可按关键词**模糊搜索**的私有数据源。
 
-- **数据规模**：178,852 条（剧集 115,409 + 影视 63,443，合并）
+- **数据规模**：184,120 条（剧集 115,409 + 影视 63,443 + 原盘 5,268，合并）
 - **部署平台**：EdgeOne Makers（Cloud Functions，非常驻服务）
 - **公网入口**：`https://mg.147771.xyz`（需自行绑定域名，见文末「部署后必做」）
 
@@ -11,7 +11,7 @@
 在「数据源 / JSON 插件」里添加，URL 需以 `.json` 结尾，直接用本仓库 raw 地址：
 
 ```
-# 合并搜索（剧集 + 影视，走 /search）
+# 合并搜索（剧集 + 影视 + 原盘，走 /search）
 https://raw.githubusercontent.com/Carolove7/javbus-plugin/master/ys-plugin.json
 
 # 磁力桥接（走 /mg，桥接 magnet.kiteyuan.info 的 MCP）
@@ -24,7 +24,7 @@ https://raw.githubusercontent.com/Carolove7/javbus-plugin/master/mg-plugin.json
 
 | 端点 | 说明 |
 |------|------|
-| `GET /search?q=<词>&page=<n>` | 剧集 + 影视合并搜索（ys-plugin.json 用） |
+| `GET /search?q=<词>&page=<n>` | 剧集 + 影视 + 原盘合并搜索（ys-plugin.json 用） |
 | `GET /detail?hash=<infoHash>` | 按 infoHash 返回完整磁力链 + 文件列表（ys-plugin.json 的 detail endpoint 用） |
 | `GET /mg?q=<词>&page=<n>`     | 桥接 magnet.kiteyuan.info 的 MCP（mg-plugin.json 用） |
 | `GET /health`                 | 健康检查 |
@@ -38,12 +38,12 @@ https://raw.githubusercontent.com/Carolove7/javbus-plugin/master/mg-plugin.json
       "m": "magnet:?xt=urn:btih:<infoHash>",
       "files": [ { "name": "<文件名>", "size": "<大小>", "magnet": "<磁力链>", "infoHash": "<infoHash>" } ] }
   ],
-  "total": 178852
+  "total": 184120
 }
 ```
 
 - `q` 为空 → 全量按页浏览（默认每页 50）；`q` 非空 → 标题子串匹配，按匹配位置排序。
-- 分片由 `影视.json` / `剧集.json` 桌面数据**扁平化重建**，每条目已带完整 `magnet`（`m` 字段），`defaults.magnet` 仅作兜底；`files` 为该作品的全部文件/多版本清单（约 91% 为多文件）。
+- 分片由 `影视.json` / `剧集.json` / `原盘.json` 桌面数据**扁平化重建**，每条目已带完整 `magnet`（`m` 字段），`defaults.magnet` 仅作兜底；`files` 为该作品的全部文件/多版本清单（约 91% 为多文件）。
 
 ## 三、目录结构
 
@@ -63,17 +63,17 @@ javbus-plugin/                 # 仓库根目录即 Makers 项目根目录
 │   ├── _test_index.mjs     # 倒排索引 vs 全扫描等价性测试（全 PASS）
 │   ├── _bench_real.mjs     # 真实数据基准（含内存）
 │   └── _data/              # build_data.js 产出（gitignored，不进函数包）
-└── index/                  # 静态分片索引（数据源，180 片：yingshi 64 + juji 116）
+└── index/                  # 静态分片索引（数据源，186 片：yingshi 64 + juji 116 + yuanpan 6）
 ```
 
 > 函数目录必须放在**项目根目录**下，Makers 才会触发 `Node functions build`；否则只产出空静态站、所有路由 404。
 
 ## 四、工作原理
 
-- `index/` 是数据源（175 个分片）。运行时从 jsDelivr 拉取分片合并，内存拼成全集（冷启动约 6s，实例复用）。
+- `index/` 是数据源（186 个分片）。运行时从 jsDelivr 拉取分片合并，内存拼成全集（冷启动约 6s，实例复用）。
 - 加载期构建 **bigram（二元组）倒排索引**（紧凑 `Int32Array` 存储）：查询先用索引交集收窄候选集，再仅对候选做精确 `indexOf` 校验与「匹配位置」排序。单字查询 / 索引不可用时自动回退全扫描。
 
-### 性能（17.4 万条实测）
+### 性能（18.4 万条实测）
 
 | 查询类型 | 全扫描 | bigram 索引 | 加速 |
 |----------|--------|-------------|------|

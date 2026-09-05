@@ -1,5 +1,5 @@
 // GET /search?q=<关键词>&page=<n>
-// EdgeOne Cloud Function：合并剧集+影视全集（约 173584 条）载入内存，按标题 t 做大小写不敏感子串过滤，
+// EdgeOne Cloud Function：合并剧集+影视+原盘全集（约 184120 条）载入内存，按标题 t 做大小写不敏感子串过滤，
 // 返回 JAVBUS 认识的 { items, total }，items 元素为 {i,t,s,d}。
 // 数据优先读同目录 _data/ 分片（随代码包部署）；缺失时回退到 jsDelivr 拉取 index/ 分片合并。
 //
@@ -217,8 +217,12 @@ async function loadData() {
       console.log(`[load] all: ${items.length} items (local chunks)`);
     } catch (e) {
       console.warn('[load] local chunks missing, fetching from remote:', e.message);
-      const [juji, yingshi] = await Promise.all([fetchShards('juji'), fetchShards('yingshi')]);
-      items = [...juji, ...yingshi];
+      const [juji, yingshi, yuanpan] = await Promise.all([
+        fetchShards('juji'),
+        fetchShards('yingshi'),
+        fetchShards('yuanpan'),
+      ]);
+      items = [...juji, ...yingshi, ...yuanpan];
       console.log(`[load] all: ${items.length} items (remote)`);
     }
     DATA = finalizeData(items);

@@ -98,15 +98,15 @@ function writeChunks(items, updatedAt) {
 }
 
 async function main() {
-  const [juji, yingshi] = await Promise.all([build('juji'), build('yingshi')]);
-  const items = [...juji, ...yingshi];
+  const [juji, yingshi, yuanpan] = await Promise.all([build('juji'), build('yingshi'), build('yuanpan')]);
+  const items = [...juji, ...yingshi, ...yuanpan];
   const updatedAt = new Date().toISOString();
   const parts = writeChunks(items, updatedAt);
   // 汇总体积日志
   let bytes = 0;
   for (let p = 1; p <= parts; p++) bytes += fs.statSync(path.join(OUT_DIR, `all-${p}.json`)).size;
   console.log(
-    `all: ${items.length} items (juji ${juji.length} + yingshi ${yingshi.length}) -> data/all-1..all-${parts}.json (${bytes} bytes, meta.parts=${parts})`
+    `all: ${items.length} items (juji ${juji.length} + yingshi ${yingshi.length} + yuanpan ${yuanpan.length}) -> data/all-1..all-${parts}.json (${bytes} bytes, meta.parts=${parts})`
   );
   return parts;
 }
