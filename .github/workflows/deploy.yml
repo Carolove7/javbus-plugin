@@ -1,0 +1,45 @@
+name: Deploy to EdgeOne Makers (manual fallback)
+
+# 主部署方式：EdgeOne「原生连接 GitHub 仓库」自动部署。
+#   项目已迁至仓库根目录（package.json / cloud-functions/ 均在根），远端构建按默认根目录即可命中函数目录。
+#
+# 本 workflow 仅作【手动兜底】：在 Actions 页面 Run workflow 触发，不会随 push 自动执行，
+# 以免与原生 Git 部署重复触发两次部署。
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-edgeone
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1 # 仓库含 index/（约 34MB），浅克隆更快
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install EdgeOne CLI
+        run: npm install -g edgeone@1.6.33 # 固定版本，避免 CLI 变更导致构建行为漂移
+
+      - name: Verify EDGEONE_TOKEN
+        env:
+          EDGEONE_TOKEN: ${{ secrets.EDGEONE_TOKEN }}
+        run: |
+          if [ -z "$EDGEONE_TOKEN" ]; then
+            echo "::error title=Missing Secret::请在仓库 Settings > Secrets and variables > Actions 中添加 EDGEONE_TOKEN"
+            exit 1
+          fi
+
+      - name: Deploy to EdgeOne Makers
+        env:
+          PAGES_SOURCE: skills # CLI 内部会读取该变量，与本地部署命令保持一致
+          EDGEONE_TOKEN: ${{ secrets.EDGEONE_TOKEN }}
+        run: edgeone makers deploy -n javbus-search-api -t "$EDGEONE_TOKEN" --json

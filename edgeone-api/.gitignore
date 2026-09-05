@@ -1,7 +1,0 @@
-# 合并索引分片由 build_data.js 在构建期生成（不进 git；运行时函数从 jsDelivr 拉取 index/ 分片合并，已验证可用）
-cloud-functions/_data/
-node_modules/
-# EdgeOne Makers 部署产物 / 本地环境（非源码）
-.edgeone/
-.env
-package-lock.json

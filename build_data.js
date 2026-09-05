@@ -11,7 +11,8 @@ import { fileURLToPath } from 'node:url';
 import { realpathSync } from 'node:fs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const ROOT = path.resolve(__dirname, '..'); // javbus-plugin/
+// build_data.js 已迁至仓库根目录，index/ 与它同级，故 ROOT 就是自身所在目录
+const ROOT = __dirname;
 const OUT_DIR = path.join(__dirname, 'cloud-functions', '_data');
 
 const REPO = 'Carolove7/javbus-plugin';
