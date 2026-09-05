@@ -1,9 +1,11 @@
 // GET /search?q=<关键词>&page=<n>
-// EdgeOne Cloud Function：合并剧集+影视+原盘全集（约 184120 条）载入内存，按 `t`+`remarks`+`tags` 拼接文本做大小写不敏感子串过滤（中文片名在 remarks，必须纳入否则原盘搜不到），
+// EdgeOne Cloud Function：合并剧集+影视+原盘全集（约 178852 条）载入内存，按 `t`+`remarks`+`tags` 拼接文本做大小写不敏感子串过滤（中文片名在 remarks，必须纳入否则原盘搜不到），
 // 返回 JAVBUS 认识的 { items, total }，items 元素为 {i,t,s,d}。
-// 数据始终从远程拉取最新提交的 index/ 分片合并（juji/yingshi/yuanpan 各分类目录下是 JSON 数组 [{...}]）。
-// 说明：全量约 1.57GB 远超函数代码包上限（128MB），无法随包上传，故运行时远程拉取是唯一可行路径；
-// 本地 _data/ 合并产物已废弃（仍被 .gitignore 忽略，且 build 脚本不再生成），解析统一走 itemsOf() 兼容数组/ {items:[]}。
+// 数据始终从远程拉取最新提交的 index-slim/ 分片合并（juji/yingshi/yuanpan 各分类目录下是 JSON 数组 [{...}]）。
+// 说明：全量 index/ 约 1.57GB（含 550 万条 files，解析后占 2.3GB 内存）远超 Cloud Function 内存/超时上限，
+// 直接全量加载会 OOM/超时导致 500。故搜索只用「精简数据集」index-slim/（仅 {i,t,s,d,m,remarks,tags}，约 73MB，
+// 解析后约 200MB），文件列表 files 不在内存，改由 /detail 端点按需按 hash 拉取单个完整分片（见 fetchItemFull）。
+// 解析统一走 itemsOf() 兼容数组/ {items:[]}。
 //
 // 性能优化要点（v2）：
 //  0) 加载期一次性预计算小写标题数组 `lowers`，搜索时不再对每个标题反复 toLowerCase()。
@@ -29,6 +31,7 @@ const BRANCH = 'master';
 // 原因：jsDelivr 对 @master 存在 CDN 滞后，曾观测到线上函数读到新旧混合/滞后的分片
 //（如 yingshi 远程 62618 而本地 63443），导致某些分类搜不到。固定到部署 commit 可保证
 // 函数永远读到与代码同版本的新鲜数据；_ref.json 缺失时回退 @master（本地/未构建环境）。
+// 搜索加载 index-slim/ 分片（精简数据集），详情按需加载 index/ 完整分片。
 let REF = BRANCH;
 try {
   const refObj = JSON.parse(readFileSync(path.join(__dirname, '_ref.json'), 'utf8'));
@@ -172,12 +175,14 @@ function itemsOf(obj) {
   if (obj && Array.isArray(obj.items)) return obj.items;
   return [];
 }
-// 兜底：并行批量从远程拉取 index/ 分片合并（分片连续编号，整批 404 即到末尾）
-async function fetchOne(type, n) {
-  const rel = `index/${type}/${type}-${n}.json`;
+// 兜底：并行批量从远程拉取分片合并（分片连续编号，整批 404 即到末尾）。
+// slim=true 读 index-slim/ 精简分片（搜索用，内存小）；slim=false 读 index/ 完整分片（详情用，含 files）。
+async function fetchOne(type, n, slim = true) {
+  const dir = slim ? 'index-slim' : 'index';
+  const rel = `${dir}/${type}/${type}-${n}.json`;
   for (const base of SOURCES) {
     try {
-      const r = await fetch(`${base}/${rel}`, { signal: AbortSignal.timeout(15000) });
+      const r = await fetch(`${base}/${rel}`, { signal: AbortSignal.timeout(30000) });
       if (r.status === 404) return null;
       if (!r.ok) continue;
       const obj = await r.json();
@@ -193,25 +198,31 @@ async function fetchShards(type) {
   const MAX = 250;
   const BATCH = 40;
   const all = [];
+  const hashToShard = new Map(); // infoHash(大写) -> [cat, n]，供 /detail 按需定位完整分片
   let consecutiveNull = 0;
   for (let start = 1; start <= MAX; start += BATCH) {
     const nums = [];
     for (let n = start; n < start + BATCH && n <= MAX; n++) nums.push(n);
-    const results = await Promise.all(nums.map((n) => fetchOne(type, n)));
+    const results = await Promise.all(nums.map((n) => fetchOne(type, n, true)));
     let batchGot = false;
-    for (const items of results) {
+    for (let bi = 0; bi < results.length; bi++) {
+      const items = results[bi];
       if (items === null) continue;
       batchGot = true;
-      all.push(...items);
+      const n = nums[bi];
+      for (const it of items) {
+        all.push(it);
+        if (it && it.i) hashToShard.set(String(it.i).toUpperCase(), [type, n]);
+      }
     }
     consecutiveNull = batchGot ? 0 : consecutiveNull + BATCH;
     if (consecutiveNull >= BATCH && all.length > 0) break; // 连续整批缺失 = 已到末尾
   }
-  if (all.length === 0) throw new Error(`无法拉取 index/${type}/（数据源均失败，可能网络受限）`);
-  return all;
+  if (all.length === 0) throw new Error(`无法拉取 index-slim/${type}/（数据源均失败，可能网络受限）`);
+  return { all, hashToShard };
 }
 
-// 载入 items 后统一构建 lowers + 倒排索引
+// 载入 items 后统一构建 lowers + 倒排索引，并把内存中搜索条目压成最小集。
 // 搜索文本 lowers = 标题 t + 备注 remarks + 标签 tags 的拼接小写（combined）。
 // 关键：原盘(yuanpan) 标题 t 是英文 BluRay 发行名（A.Taxi.Driver.2017...），中文片名只在 remarks
 // （出租车司机 택시 운전사 (2017)）。必须把 remarks/tags 纳入 lowers，中文查询才能命中原盘——
@@ -219,6 +230,10 @@ async function fetchShards(type) {
 // 代价：combined 索引约 37.6M postings（~144MB）可能超过函数内存预算（SEARCH_INDEX_MAX_MB 默认 128），
 // 此时 buildIndex 自动回退 null，searchIndexed 转全扫描（结果仍正确，仅稍慢）。小内存函数安全回退，
 // 大内存函数则享受快速倒排。两处回退（索引缺失 / 倒排无候选）都走 searchScan，保证不漏匹配。
+//
+// 内存优化：构建 lowers 后，内存条目仅保留搜索返回/定位所需字段 {i,t,s,d,m}。
+// remarks/tags 已并入 lowers 用于检索，无需再占内存；files 本就不在精简数据集（/detail 按需取）。
+// 这把冷启动内存从全量 2.3GB 压到约 250-300MB，避免 Cloud Function OOM/超时。
 function finalizeData(items) {
   const lowers = new Array(items.length);
   for (let i = 0; i < items.length; i++) {
@@ -226,26 +241,33 @@ function finalizeData(items) {
     const tags = Array.isArray(it.tags) ? it.tags.join(' ') : '';
     lowers[i] = `${it.t || ''} ${it.remarks || ''} ${tags}`.toLowerCase();
   }
+  const slim = new Array(items.length);
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i];
+    slim[i] = { i: it.i, t: it.t, s: it.s, d: it.d, m: it.m };
+  }
   let index = null;
   if (USE_INDEX()) index = buildIndex(lowers);
-  return { items, lowers, index };
+  return { items: slim, lowers, index };
 }
 
 async function loadData() {
   if (DATA) return DATA;
   if (loading) return loading;
   loading = (async () => {
-    // 始终从远程拉取最新提交的 index/ 分片合并（含 juji/yingshi/yuanpan 各分类），
-    // 避免依赖可能过期的本地 _data，确保新增分类（原盘）也能被 /search 搜到。
+    // 始终从远程拉取最新提交的 index-slim/ 分片合并（含 juji/yingshi/yuanpan 各分类），
+    // 精简数据集仅 ~73MB，避免把 1.57GB 全量（含 550 万 files）载入内存导致 OOM/超时。
     const [juji, yingshi, yuanpan] = await Promise.all([
       fetchShards('juji'),
       fetchShards('yingshi'),
       fetchShards('yuanpan'),
     ]);
-    const items = [...juji, ...yingshi, ...yuanpan];
-    console.log(`[load] all: ${items.length} items (remote, ref=${REF}) juji=${juji.length} yingshi=${yingshi.length} yuanpan=${yuanpan.length}`);
+    const items = [...juji.all, ...yingshi.all, ...yuanpan.all];
+    const hashToShard = new Map([...juji.hashToShard, ...yingshi.hashToShard, ...yuanpan.hashToShard]);
+    console.log(`[load] all: ${items.length} items (slim, ref=${REF}) juji=${juji.all.length} yingshi=${yingshi.all.length} yuanpan=${yuanpan.all.length} hashIndex=${hashToShard.size}`);
     DATA = finalizeData(items);
-    DATA.catCounts = { juji: juji.length, yingshi: yingshi.length, yuanpan: yuanpan.length, ref: REF };
+    DATA.catCounts = { juji: juji.all.length, yingshi: yingshi.all.length, yuanpan: yuanpan.all.length, ref: REF };
+    DATA.hashToShard = hashToShard;
     return DATA;
   })();
   try {
@@ -408,5 +430,19 @@ export async function onRequestGet(context) {
   }
 }
 
-// 导出内部构件（供基准/测试复用；detail.js 复用 loadData 以共用同一数据源）
+// 按 infoHash 按需拉取「单个完整分片」并返回含 files 的完整条目（/detail 用，避免全量 files 进内存）。
+// 定位：先用 loadData 建立好的 hashToShard（infoHash -> [cat, n]），只下载该分片（平均 ~8MB，最大 ~42MB），
+// 远小于全量 1.57GB。未命中返回 null。
+export async function fetchItemFull(hash) {
+  const data = await loadData();
+  const h = String(hash || '').toUpperCase();
+  const loc = data.hashToShard && data.hashToShard.get(h);
+  if (!loc) return null;
+  const [cat, n] = loc;
+  const items = await fetchOne(cat, n, false); // 完整分片（含 files）
+  if (!items) return null;
+  return items.find((it) => it && it.i && String(it.i).toUpperCase() === h) || null;
+}
+
+// 导出内部构件（供基准/测试复用；detail.js 用 fetchItemFull 按需取完整条目）
 export { buildIndex, intersect, finalizeData, bigramsOf, loadData };
