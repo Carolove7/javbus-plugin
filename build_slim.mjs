@@ -87,12 +87,29 @@ const PW = 40;
 const hashStr = order.map((i) => hashes[i].slice(0, PW).padEnd(PW, '0')).join('');
 const sortedHashItem = order.map((i) => hashItem[i]);
 
-// Split into two files to avoid the ~3x JSON parse overhead on the giant text string:
-//  - search.meta.json: compact arrays + hash table (small, parsed as JSON)
-//  - search.text: raw UTF-8 text, decoded directly via Buffer (no JSON string escaping overhead)
+// Split into files to avoid the ~3x JSON parse overhead on the giant text string:
+//  - search.meta.json: compact arrays + hash table (parsed as JSON)
+//  - text-N: raw UTF-8 text chunks, decoded directly via Buffer (no JSON string escaping overhead)
+//
+// IMPORTANT: jsDelivr REJECTS GitHub files larger than ~20MB with HTTP 403 (verified: a single
+// 39MB search.text got 403). So the text MUST be split into chunks well under that limit;
+// search.js concatenates the chunk BUFFERS first and decodes once (never decode chunk-by-chunk,
+// or multi-byte CJK chars straddling a boundary would corrupt).
 const meta = { total: globalIndex, bounds, cat: catArr, shard: shardArr, itemIdx: itemIdxArr, hashStr, hashItem: sortedHashItem, catCounts };
+
+const TEXT_CHUNK_BYTES = 10 * 1024 * 1024; // 10MB per chunk, safely under jsDelivr's ~20MB cap
+const buf = Buffer.from(text, 'utf8');
+let nChunks = 0;
+for (let off = 0; off < buf.length; off += TEXT_CHUNK_BYTES) {
+  nChunks++;
+  fs.writeFileSync(path.join(DST, `text-${nChunks}`), buf.subarray(off, off + TEXT_CHUNK_BYTES));
+}
+meta.textChunks = nChunks;
+// remove the legacy single-file text (it exceeded jsDelivr's cap and caused 403 -> /search 500)
+const legacy = path.join(DST, 'search.text');
+if (fs.existsSync(legacy)) fs.rmSync(legacy);
+
 fs.writeFileSync(path.join(DST, 'search.meta.json'), JSON.stringify(meta));
-fs.writeFileSync(path.join(DST, 'search.text'), Buffer.from(text, 'utf8'));
 const metaMB = (fs.statSync(path.join(DST, 'search.meta.json')).size / 1024 / 1024).toFixed(1);
-const textMB = (fs.statSync(path.join(DST, 'search.text')).size / 1024 / 1024).toFixed(1);
-console.log(`[search] ${globalIndex} items, meta=${metaMB}MB text=${textMB}MB, catCounts=${JSON.stringify(catCounts)}`);
+const textMB = (buf.length / 1024 / 1024).toFixed(1);
+console.log(`[search] ${globalIndex} items, meta=${metaMB}MB text=${textMB}MB in ${nChunks} chunks, catCounts=${JSON.stringify(catCounts)}`);

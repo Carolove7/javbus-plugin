@@ -60,27 +60,45 @@ async function fetchJson(rel) {
   return null;
 }
 
+// Fetch raw bytes for a path (tries each source). Returns Buffer or null.
+async function fetchBuf(rel) {
+  for (const base of SOURCES) {
+    try {
+      const r = await fetch(`${base}/${rel}`, { signal: AbortSignal.timeout(30000) });
+      if (r.status === 404) continue;
+      if (!r.ok) continue;
+      return Buffer.from(await r.arrayBuffer());
+    } catch {
+      // try next source
+    }
+  }
+  return null;
+}
+
 async function loadSearch() {
   if (SEARCH) return SEARCH;
   if (loading) return loading;
   loading = (async () => {
     const meta = await fetchJson('index-slim/search.meta.json');
     if (!meta) throw new Error('cannot fetch index-slim/search.meta.json (data source failed)');
-    // raw UTF-8 text: decode directly via Buffer to avoid the ~3x JSON string-parse overhead
+    // Raw UTF-8 text, split into chunks: jsDelivr returns HTTP 403 for GitHub files larger
+    // than ~20MB, so a single 39MB search.text could never be served. Concatenate the chunk
+    // BUFFERS first and decode ONCE — decoding per-chunk would corrupt multi-byte CJK chars
+    // that straddle a chunk boundary.
     let text = '';
-    for (const base of SOURCES) {
-      try {
-        const r = await fetch(`${base}/index-slim/search.text`, { signal: AbortSignal.timeout(30000) });
-        if (r.status === 404) continue;
-        if (!r.ok) continue;
-        const buf = Buffer.from(await r.arrayBuffer());
-        text = buf.toString('utf8');
-        break;
-      } catch {
-        // try next source
-      }
+    const nChunks = Number(meta.textChunks || 0);
+    if (nChunks > 0) {
+      const parts = await Promise.all(
+        Array.from({ length: nChunks }, (_, k) => fetchBuf(`index-slim/text-${k + 1}`)),
+      );
+      if (parts.some((p) => !p)) throw new Error('cannot fetch index-slim/text-N (data source failed)');
+      text = Buffer.concat(parts).toString('utf8');
+    } else {
+      // legacy single-file layout
+      const buf = await fetchBuf('index-slim/search.text');
+      if (!buf) throw new Error('cannot fetch index-slim/search.text (data source failed)');
+      text = buf.toString('utf8');
     }
-    if (!text) throw new Error('cannot fetch index-slim/search.text (data source failed)');
     const data = {
       text,
       bounds: Int32Array.from(meta.bounds),
