@@ -1,40 +1,32 @@
-// GET /search?q=kw&page=n  EdgeOne Cloud Function (ASCII-only comments)
+// GET /search?q=kw&page=n  EdgeOne Pages Function (ASCII-only comments)
 // Merge juji+yingshi+yuanpan (~178852 items) into one case-insensitive substring search.
 // Returns { items, total } where items = { i, t, s, d, m }.
-// Search text lowers = t + remarks + tags lowercased (combined). Chinese titles live in remarks.
+// Searchable text per item = (t + remarks + tags).toLowerCase() — Chinese titles live in remarks.
 //
-// Memory constraint: CF runtime memory limit is far below 2.3GB full or 180MB slim-objects.
-// On-demand architecture:
-//  1) Cold start downloads only index-slim/search.json (~20MB): all lowers concatenated into one
-//     long text + compact locator tables (bounds/cat/shard/itemIdx) + sorted hashes table.
-//     Resident memory after parse is ~35MB.
-//  2) Search scans the long text with indexOf (native C++, ~10-30ms), maps hit positions to global
-//     item indices via binary search over bounds.
-//  3) Only the current page results fetch their metadata on demand (index-slim shard, LRU cached).
-//  4) /detail fetches a single full shard (index/<cat>/<cat>-N.json, with files) on demand by hash.
-// Peak memory stays ~40MB, eliminating OOM/timeout 500s.
+// !! RUNTIME CONSTRAINT !!
+// This runs on the EdgeOne Pages Functions V8 EDGE RUNTIME, NOT full Node.js. Confirmed by
+// production: using `Buffer` crashed the function with "ReferenceError" (500/503), while
+// mg.js — which only uses fetch/Response/process.env — works fine.
+// => DO NOT use: Buffer, node:fs, node:path, node:url, require, __dirname, __filename.
+// => Allowed: fetch, Response/Request, TextDecoder, DecompressionStream, AbortController,
+//    setTimeout, process.env, JSON, Int32Array.
 //
-// Data source pinned to deploy commit SHA (cloud-functions/_ref.json), not @master (avoids CDN lag).
-// Fallback to @master when _ref.json is absent (local/unbuilt env).
-import { readFileSync } from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PAGE_SIZE = Math.max(1, Number(process.env.PAGE_SIZE || 50));
+// On-demand architecture (keeps cold start tiny and memory ~60MB):
+//  1) Cold start downloads only index-slim/meta.z + index-slim/text.z (~4MB gzipped).
+//  2) Search scans one long text with indexOf (native), maps hit offsets -> item index via
+//     binary search over `bounds`.
+//  3) Only the current page fetches its metadata (index-slim/<cat>/<cat>-N.json, LRU cached).
+//  4) /detail loads index-slim/hash.z lazily, then a single FULL shard by infoHash.
+//
+// Data source is pinned to the deploy commit SHA (cloud-functions/_ref.js) to dodge jsDelivr's
+// @master cache lag; falls back to @master when _ref.js is unavailable.
+const PAGE_SIZE = Math.max(1, Number((typeof process !== 'undefined' && process.env ? process.env.PAGE_SIZE : 0) || 50));
 const REPO = 'Carolove7/javbus-plugin';
-const BRANCH = 'master';
-let REF = BRANCH;
-try {
-  const refObj = JSON.parse(readFileSync(path.join(__dirname, '_ref.json'), 'utf8'));
-  if (refObj && refObj.ref) REF = refObj.ref;
-} catch {
-  // no _ref.json -> fallback @master
-}
-const SOURCES = [
-  `https://cdn.jsdelivr.net/gh/${REPO}@${REF}`,
-  `https://raw.githubusercontent.com/${REPO}/${REF}`,
-];
+const DEFAULT_REF = 'master';
+const TIMEOUT_MS = 30000;
+
+const GZ = typeof DecompressionStream !== 'undefined';
+const TD = new TextDecoder();
 
 const QCACHE_MAX = 500;
 const queryCache = new Map();
@@ -43,75 +35,115 @@ const CATS = ['juji', 'yingshi', 'yuanpan'];
 
 let SEARCH = null;
 let loading = null;
+let SRC = null;
 const shardCache = new Map(); // `${cat}/${n}` -> slim items array
 const SHARD_CACHE_MAX = 8;
+let HASH = null;
 
-async function fetchJson(rel) {
-  for (const base of SOURCES) {
+// ------------------------------------------------------------------ data source plumbing
+async function getRef() {
+  try {
+    const m = await import('./_ref.js');
+    if (m && typeof m.DATA_REF === 'string' && /^[0-9a-f]{7,40}$/.test(m.DATA_REF)) return m.DATA_REF;
+  } catch {
+    // _ref.js absent or unbundled -> fall back to @master
+  }
+  return DEFAULT_REF;
+}
+
+async function getSources() {
+  if (SRC) return SRC;
+  const r = await getRef();
+  const list = [`https://cdn.jsdelivr.net/gh/${REPO}@${r}`];
+  if (r !== DEFAULT_REF) list.push(`https://cdn.jsdelivr.net/gh/${REPO}@${DEFAULT_REF}`);
+  list.push(`https://raw.githubusercontent.com/${REPO}/${r}`);
+  SRC = list;
+  return list;
+}
+
+function isGz(b) { return b && b.length > 2 && b[0] === 0x1f && b[1] === 0x8b; }
+
+async function gunzipToString(b) {
+  const rs = new ReadableStream({ start(c) { c.enqueue(b); c.close(); } });
+  return await new Response(rs.pipeThrough(new DecompressionStream('gzip'))).text();
+}
+
+// Fetch raw bytes for a repo-relative path across all sources. Returns Uint8Array or null.
+async function fetchBytes(rel) {
+  for (const base of await getSources()) {
+    const ac = new AbortController();
+    const timer = setTimeout(() => { try { ac.abort(); } catch {} }, TIMEOUT_MS);
     try {
-      const r = await fetch(`${base}/${rel}`, { signal: AbortSignal.timeout(30000) });
-      if (r.status === 404) return null;
-      if (!r.ok) continue;
-      return await r.json();
+      const r = await fetch(`${base}/${rel}`, { signal: ac.signal });
+      if (!r.ok) continue; // 404 -> try next source
+      return new Uint8Array(await r.arrayBuffer());
     } catch {
       // try next source
+    } finally {
+      clearTimeout(timer);
     }
   }
   return null;
 }
 
-// Fetch raw bytes for a path (tries each source). Returns Buffer or null.
-async function fetchBuf(rel) {
-  for (const base of SOURCES) {
-    try {
-      const r = await fetch(`${base}/${rel}`, { signal: AbortSignal.timeout(30000) });
-      if (r.status === 404) continue;
-      if (!r.ok) continue;
-      return Buffer.from(await r.arrayBuffer());
-    } catch {
-      // try next source
-    }
+// Fetch text, preferring the gzipped variant. Falls back to the plain file when the runtime
+// lacks DecompressionStream. jsDelivr may transparently gunzip, so sniff the magic bytes
+// instead of trusting the file name.
+async function fetchText(relGz, relPlain) {
+  if (GZ) {
+    const b = await fetchBytes(relGz);
+    if (b) return isGz(b) ? await gunzipToString(b) : TD.decode(b);
   }
-  return null;
+  const p = await fetchBytes(relPlain);
+  return p ? TD.decode(p) : null;
 }
 
+async function fetchJsonSmart(relGz, relPlain) {
+  const t = await fetchText(relGz, relPlain);
+  if (!t) return null;
+  try {
+    return JSON.parse(t);
+  } catch {
+    return null;
+  }
+}
+
+// ------------------------------------------------------------------ cold start
 async function loadSearch() {
   if (SEARCH) return SEARCH;
   if (loading) return loading;
   loading = (async () => {
-    const meta = await fetchJson('index-slim/search.meta.json');
-    if (!meta) throw new Error('cannot fetch index-slim/search.meta.json (data source failed)');
-    // Raw UTF-8 text, split into chunks: jsDelivr returns HTTP 403 for GitHub files larger
-    // than ~20MB, so a single 39MB search.text could never be served. Concatenate the chunk
-    // BUFFERS first and decode ONCE — decoding per-chunk would corrupt multi-byte CJK chars
-    // that straddle a chunk boundary.
-    let text = '';
-    const nChunks = Number(meta.textChunks || 0);
-    if (nChunks > 0) {
-      const parts = await Promise.all(
-        Array.from({ length: nChunks }, (_, k) => fetchBuf(`index-slim/text-${k + 1}`)),
-      );
-      if (parts.some((p) => !p)) throw new Error('cannot fetch index-slim/text-N (data source failed)');
-      text = Buffer.concat(parts).toString('utf8');
-    } else {
-      // legacy single-file layout
-      const buf = await fetchBuf('index-slim/search.text');
-      if (!buf) throw new Error('cannot fetch index-slim/search.text (data source failed)');
-      text = buf.toString('utf8');
+    let meta = await fetchJsonSmart('index-slim/meta.z', 'index-slim/search.meta.json');
+    if (!meta) throw new Error('cannot fetch index-slim meta (data source failed)');
+
+    let text;
+    if (GZ) {
+      const b = await fetchBytes('index-slim/text.z');
+      if (b) text = isGz(b) ? await gunzipToString(b) : TD.decode(b);
     }
+    if (text == null) {
+      // no DecompressionStream (or gz missing) -> stitch the raw UTF-8 chunks
+      const n = Number(meta.textPlainChunks || 0);
+      if (!n) throw new Error('cannot fetch index-slim text (data source failed)');
+      const parts = [];
+      for (let i = 1; i <= n; i++) {
+        const b = await fetchBytes(`index-slim/plain-${i}`);
+        if (!b) throw new Error(`cannot fetch index-slim/plain-${i} (data source failed)`);
+        parts.push(TD.decode(b));
+      }
+      text = parts.join('');
+    }
+
     const data = {
       text,
       bounds: Int32Array.from(meta.bounds),
       cat: Int32Array.from(meta.cat),
       shard: Int32Array.from(meta.shard),
       itemIdx: Int32Array.from(meta.itemIdx),
-      hashStr: meta.hashStr,
-      hashItem: Int32Array.from(meta.hashItem),
       total: meta.total,
       catCounts: meta.catCounts || null,
-      ref: REF,
     };
-    console.log(`[load] search: ${data.total} items, textLen=${data.text.length}, ref=${REF}`);
+    console.log(`[load] ${data.total} items, textLen=${data.text.length}, gz=${GZ}`);
     SEARCH = data;
     return data;
   })();
@@ -122,7 +154,7 @@ async function loadSearch() {
   }
 }
 
-// binary search: first item index whose bounds > pos  => item spans [bounds[i-1], bounds[i])
+// binary search: first item index whose bounds > pos => item spans [bounds[i-1], bounds[i])
 function itemAt(s, pos) {
   const b = s.bounds;
   let lo = 0, hi = b.length - 1, ans = 0;
@@ -141,7 +173,7 @@ async function getMeta(s, k) {
   const key = `${cat}/${n}`;
   let arr = shardCache.get(key);
   if (!arr) {
-    const got = await fetchJson(`index-slim/${cat}/${cat}-${n}.json`);
+    const got = await fetchJsonSmart(`index-slim/${cat}/${cat}-${n}.json`, `index-slim/${cat}/${cat}-${n}.json`);
     if (!got) return null;
     arr = Array.isArray(got) ? got : (got.items || []);
     if (shardCache.size >= SHARD_CACHE_MAX) shardCache.delete(shardCache.keys().next().value);
@@ -206,7 +238,7 @@ export async function onRequestGet(context) {
     if (hit) return sendJson(hit, 200, true);
     const data = await loadSearch();
     const out = await search(data, q, page);
-    if (debug && data.catCounts) out.debug = data.catCounts;
+    if (debug) out.debug = Object.assign({ gz: GZ, textLen: data.text.length, ref: (SRC && SRC[0]) || '' }, data.catCounts || {});
     if (queryCache.size >= QCACHE_MAX) queryCache.delete(queryCache.keys().next().value);
     queryCache.set(key, out);
     return sendJson(out);
@@ -215,25 +247,36 @@ export async function onRequestGet(context) {
   }
 }
 
-// /detail: fetch a single FULL shard (with files) on demand by infoHash.
+// ------------------------------------------------------------------ /detail
+async function getHashTable() {
+  if (HASH) return HASH;
+  const o = await fetchJsonSmart('index-slim/hash.z', 'index-slim/hash.json');
+  if (!o || !o.hashStr) return null;
+  HASH = { hashStr: o.hashStr, w: o.w || 40, hashItem: Int32Array.from(o.hashItem) };
+  return HASH;
+}
+
+// Fetch a single FULL shard (with files) on demand by infoHash.
 export async function fetchItemFull(hash) {
   const data = await loadSearch();
-  const h = String(hash || '').toUpperCase().slice(0, 40).padEnd(40, '0');
-  const PW = 40;
-  const hs = data.hashStr;
-  let lo = 0, hi = data.hashItem.length - 1, found = -1;
+  const hs = await getHashTable();
+  if (!hs) throw new Error('cannot fetch index-slim/hash (data source failed)');
+  const PW = hs.w;
+  const h = String(hash || '').toUpperCase().slice(0, PW).padEnd(PW, '0');
+  const str = hs.hashStr;
+  let lo = 0, hi = hs.hashItem.length - 1, found = -1;
   while (lo <= hi) {
     const mid = (lo + hi) >> 1;
-    const cur = hs.substr(mid * PW, PW);
+    const cur = str.substr(mid * PW, PW);
     if (cur === h) { found = mid; break; }
     if (cur < h) lo = mid + 1; else hi = mid - 1;
   }
   if (found === -1) return null;
-  const k = data.hashItem[found];
+  const k = hs.hashItem[found];
   const cat = CATS[data.cat[k]];
   const n = data.shard[k];
   const ii = data.itemIdx[k];
-  const got = await fetchJson(`index/${cat}/${cat}-${n}.json`);
+  const got = await fetchJsonSmart(`index/${cat}/${cat}-${n}.json`, `index/${cat}/${cat}-${n}.json`);
   if (!got) return null;
   const items = Array.isArray(got) ? got : (got.items || []);
   return items[ii] || null;
