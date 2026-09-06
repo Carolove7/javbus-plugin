@@ -6,6 +6,7 @@
   "description": "JAVBUS 关键词搜索适配服务 (EdgeOne)",
   "scripts": {
     "build": "node build_ref.mjs",
+    "build:pages": "node build_ref.mjs && node build_pages.mjs",
     "builddata": "node build_data.js"
   },
   "engines": {

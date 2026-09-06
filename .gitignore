@@ -10,3 +10,6 @@ package-lock.json
 # WorkBuddy 本地工作区数据（含项目笔记/部署信息，不入库）
 .workbuddy/
 cloud-functions/_ref.js
+# Git 连接部署（makers-wfh5gmrpw0pi）的构建产物：build_pages.mjs 在远端把可部署文件
+# 拷贝进 dist/ 作为 OutputDir；dist/ 由远端构建生成，不入库（避免陈旧副本 + 与本地 CLI 部署区分）
+dist/
