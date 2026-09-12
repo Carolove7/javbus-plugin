@@ -23,7 +23,14 @@
 const PAGE_SIZE = Math.max(1, Number((typeof process !== 'undefined' && process.env ? process.env.PAGE_SIZE : 0) || 50));
 const REPO = 'Carolove7/javbus-plugin';
 const DEFAULT_REF = 'master';
-const TIMEOUT_MS = 30000;
+// Budget model (https://cloud.tencent.com/document/product/1095/101095):
+// EdgeOne returns 524/554 when the ORIGIN (this function) does not answer within the origin read
+// timeout. The old single value of 30s per attempt x 3 sources = up to 90s per file, which is what
+// produced production 554s on cold start. Everything below is now bounded by a hard deadline so we
+// always answer before the edge gives up.
+const TIMEOUT_MS = 6000; // per single source attempt
+const LOAD_BUDGET_MS = 7000; // budget for cold-loading the search index
+const REQ_BUDGET_MS = 8000; // hard budget for a whole request; must stay under the origin timeout
 
 const GZ = typeof DecompressionStream !== 'undefined';
 const TD = new TextDecoder();
@@ -68,11 +75,20 @@ async function gunzipToString(b) {
   return await new Response(rs.pipeThrough(new DecompressionStream('gzip'))).text();
 }
 
+// Remaining milliseconds before `deadline` (Infinity when unbounded).
+function remaining(deadline) {
+  return deadline ? deadline - Date.now() : Infinity;
+}
+
 // Fetch raw bytes for a repo-relative path across all sources. Returns Uint8Array or null.
-async function fetchBytes(rel) {
+// `deadline` is an absolute epoch-ms budget shared by the whole request; once it is exhausted we
+// stop trying further sources instead of burning another 30s.
+async function fetchBytes(rel, deadline) {
   for (const base of await getSources()) {
+    const left = remaining(deadline);
+    if (left <= 250) break;
     const ac = new AbortController();
-    const timer = setTimeout(() => { try { ac.abort(); } catch {} }, TIMEOUT_MS);
+    const timer = setTimeout(() => { try { ac.abort(); } catch {} }, Math.min(TIMEOUT_MS, left));
     try {
       const r = await fetch(`${base}/${rel}`, { signal: ac.signal });
       if (!r.ok) continue; // 404 -> try next source
@@ -89,17 +105,17 @@ async function fetchBytes(rel) {
 // Fetch text, preferring the gzipped variant. Falls back to the plain file when the runtime
 // lacks DecompressionStream. jsDelivr may transparently gunzip, so sniff the magic bytes
 // instead of trusting the file name.
-async function fetchText(relGz, relPlain) {
+async function fetchText(relGz, relPlain, deadline) {
   if (GZ) {
-    const b = await fetchBytes(relGz);
+    const b = await fetchBytes(relGz, deadline);
     if (b) return isGz(b) ? await gunzipToString(b) : TD.decode(b);
   }
-  const p = await fetchBytes(relPlain);
+  const p = await fetchBytes(relPlain, deadline);
   return p ? TD.decode(p) : null;
 }
 
-async function fetchJsonSmart(relGz, relPlain) {
-  const t = await fetchText(relGz, relPlain);
+async function fetchJsonSmart(relGz, relPlain, deadline) {
+  const t = await fetchText(relGz, relPlain, deadline);
   if (!t) return null;
   try {
     return JSON.parse(t);
@@ -109,16 +125,16 @@ async function fetchJsonSmart(relGz, relPlain) {
 }
 
 // ------------------------------------------------------------------ cold start
-async function loadSearch() {
+async function loadSearch(deadline) {
   if (SEARCH) return SEARCH;
   if (loading) return loading;
   loading = (async () => {
-    let meta = await fetchJsonSmart('index-slim/meta.z', 'index-slim/search.meta.json');
+    let meta = await fetchJsonSmart('index-slim/meta.z', 'index-slim/search.meta.json', deadline);
     if (!meta) throw new Error('cannot fetch index-slim meta (data source failed)');
 
     let text;
     if (GZ) {
-      const b = await fetchBytes('index-slim/text.z');
+      const b = await fetchBytes('index-slim/text.z', deadline);
       if (b) text = isGz(b) ? await gunzipToString(b) : TD.decode(b);
     }
     if (text == null) {
@@ -127,7 +143,7 @@ async function loadSearch() {
       if (!n) throw new Error('cannot fetch index-slim text (data source failed)');
       const parts = [];
       for (let i = 1; i <= n; i++) {
-        const b = await fetchBytes(`index-slim/plain-${i}`);
+        const b = await fetchBytes(`index-slim/plain-${i}`, deadline);
         if (!b) throw new Error(`cannot fetch index-slim/plain-${i} (data source failed)`);
         parts.push(TD.decode(b));
       }
@@ -154,6 +170,39 @@ async function loadSearch() {
   }
 }
 
+// Cold-load the index within `budgetMs`. Returns null when it is not ready in time - the
+// in-flight promise keeps running, so the next request (a retry) hits a warm SEARCH.
+// Note: `loadSearch` caches into the module-level `loading`, so concurrent requests share work.
+async function ensureSearch(budgetMs) {
+  if (SEARCH) return SEARCH;
+  const deadline = Date.now() + budgetMs;
+  let timer;
+  const guard = new Promise((res) => { timer = setTimeout(() => res(null), budgetMs); });
+  try {
+    return await Promise.race([loadSearch(deadline).catch(() => null), guard]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// 503 + Retry-After instead of hanging: the edge answers 554 when we exceed the origin timeout,
+// which clients cannot interpret. A fast 503 lets the caller retry against an already-warm instance.
+function warming(reason) {
+  return new Response(JSON.stringify({
+    error: reason || 'warming up, please retry',
+    retry: true,
+    warming: true,
+  }), {
+    status: 503,
+    headers: {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Access-Control-Allow-Origin': '*',
+      'Cache-Control': 'no-store',
+      'Retry-After': '2',
+    },
+  });
+}
+
 // binary search: first item index whose bounds > pos => item spans [bounds[i-1], bounds[i])
 function itemAt(s, pos) {
   const b = s.bounds;
@@ -166,14 +215,15 @@ function itemAt(s, pos) {
   return ans;
 }
 
-async function getMeta(s, k) {
+async function getMeta(s, k, deadline) {
   const cat = CATS[s.cat[k]];
   const n = s.shard[k];
   const ii = s.itemIdx[k];
   const key = `${cat}/${n}`;
   let arr = shardCache.get(key);
   if (!arr) {
-    const got = await fetchJsonSmart(`index-slim/${cat}/${cat}-${n}.json`, `index-slim/${cat}/${cat}-${n}.json`);
+    if (remaining(deadline) <= 250) return null;
+    const got = await fetchJsonSmart(`index-slim/${cat}/${cat}-${n}.json`, `index-slim/${cat}/${cat}-${n}.json`, deadline);
     if (!got) return null;
     arr = Array.isArray(got) ? got : (got.items || []);
     if (shardCache.size >= SHARD_CACHE_MAX) shardCache.delete(shardCache.keys().next().value);
@@ -184,7 +234,7 @@ async function getMeta(s, k) {
   return { i: it.i, t: it.t, s: it.s, d: it.d, m: it.m };
 }
 
-export async function search(data, q, page) {
+export async function search(data, q, page, deadline) {
   const ql = (q || '').trim().toLowerCase().split(SEP).join('');
   const p = Math.max(1, parseInt(page, 10) || 1);
   const start = (p - 1) * PAGE_SIZE;
@@ -192,7 +242,7 @@ export async function search(data, q, page) {
     const total = data.total;
     const ks = [];
     for (let k = start; k < Math.min(start + PAGE_SIZE, total); k++) ks.push(k);
-    const items = (await Promise.all(ks.map((k) => getMeta(data, k)))).filter(Boolean);
+    const items = (await Promise.all(ks.map((k) => getMeta(data, k, deadline)))).filter(Boolean);
     return { items, total };
   }
   const text = data.text;
@@ -211,7 +261,7 @@ export async function search(data, q, page) {
   }
   const total = uniq.length;
   const pageKs = uniq.slice(start, start + PAGE_SIZE);
-  const items = (await Promise.all(pageKs.map((k) => getMeta(data, k)))).filter(Boolean);
+  const items = (await Promise.all(pageKs.map((k) => getMeta(data, k, deadline)))).filter(Boolean);
   return { items, total };
 }
 
@@ -236,8 +286,20 @@ export async function onRequestGet(context) {
     const key = `${q}|${page}`;
     const hit = queryCache.get(key);
     if (hit) return sendJson(hit, 200, true);
-    const data = await loadSearch();
-    const out = await search(data, q, page);
+
+    // Hard request budget: answer before the EdgeOne origin read timeout would turn us into a 554.
+    const deadline = Date.now() + REQ_BUDGET_MS;
+    const data = await ensureSearch(LOAD_BUDGET_MS);
+    if (!data) return warming('index still loading (cold start), retry in 2s');
+
+    const out = await Promise.race([
+      search(data, q, page, deadline),
+      new Promise((res) => setTimeout(() => res(null), Math.max(0, deadline - Date.now()))),
+    ]);
+    // Partial/aborted page: do not cache it, and tell the caller to retry (warm by now).
+    if (!out || (out.items.length === 0 && out.total > 0)) {
+      return warming('page metadata still loading, retry in 2s');
+    }
     if (debug) out.debug = Object.assign({ gz: GZ, textLen: data.text.length, ref: (SRC && SRC[0]) || '' }, data.catCounts || {});
     if (queryCache.size >= QCACHE_MAX) queryCache.delete(queryCache.keys().next().value);
     queryCache.set(key, out);
@@ -248,18 +310,19 @@ export async function onRequestGet(context) {
 }
 
 // ------------------------------------------------------------------ /detail
-async function getHashTable() {
+async function getHashTable(deadline) {
   if (HASH) return HASH;
-  const o = await fetchJsonSmart('index-slim/hash.z', 'index-slim/hash.json');
+  const o = await fetchJsonSmart('index-slim/hash.z', 'index-slim/hash.json', deadline);
   if (!o || !o.hashStr) return null;
   HASH = { hashStr: o.hashStr, w: o.w || 40, hashItem: Int32Array.from(o.hashItem) };
   return HASH;
 }
 
 // Fetch a single FULL shard (with files) on demand by infoHash.
-export async function fetchItemFull(hash) {
-  const data = await loadSearch();
-  const hs = await getHashTable();
+// `deadline` caps the whole lookup; returns null when it cannot finish in time (caller sends 503).
+export async function fetchItemFull(hash, deadline) {
+  const data = await loadSearch(deadline);
+  const hs = await getHashTable(deadline);
   if (!hs) throw new Error('cannot fetch index-slim/hash (data source failed)');
   const PW = hs.w;
   const h = String(hash || '').toUpperCase().slice(0, PW).padEnd(PW, '0');
@@ -276,10 +339,11 @@ export async function fetchItemFull(hash) {
   const cat = CATS[data.cat[k]];
   const n = data.shard[k];
   const ii = data.itemIdx[k];
-  const got = await fetchJsonSmart(`index/${cat}/${cat}-${n}.json`, `index/${cat}/${cat}-${n}.json`);
+  if (remaining(deadline) <= 250) return null;
+  const got = await fetchJsonSmart(`index/${cat}/${cat}-${n}.json`, `index/${cat}/${cat}-${n}.json`, deadline);
   if (!got) return null;
   const items = Array.isArray(got) ? got : (got.items || []);
   return items[ii] || null;
 }
 
-export { loadSearch };
+export { loadSearch, ensureSearch, warming };

@@ -6,7 +6,12 @@
 // 含 files），不再把 550 万条 files 全量载入内存（那会导致 /search 冷启动 OOM/超时 500）。
 // 返回对象形状与 search 结果项一致（{i,t,s,d,m,files,...}），可直接被插件 fields 映射复用；
 // filesPath=「files」、fileFields 由插件侧配置。
-import { fetchItemFull } from './search.js';
+import { fetchItemFull, warming } from './search.js';
+
+// Must stay under the EdgeOne origin read timeout, otherwise the edge answers 524/554 and the
+// client gets an opaque "Request failed with status code 554" instead of a retryable response.
+const REQ_BUDGET_MS = 8000;
+const PENDING = Symbol('pending');
 
 function sendJson(obj, status = 200) {
   return new Response(JSON.stringify(obj), {
@@ -25,7 +30,12 @@ export async function onRequestGet(context) {
     const hash = (u.searchParams.get('hash') || '').trim().toUpperCase();
     if (!hash) return sendJson({ error: 'missing hash' }, 400);
 
-    const it = await fetchItemFull(hash);
+    const deadline = Date.now() + REQ_BUDGET_MS;
+    const it = await Promise.race([
+      fetchItemFull(hash, deadline).catch(() => null),
+      new Promise((res) => setTimeout(() => res(PENDING), REQ_BUDGET_MS)),
+    ]);
+    if (it === PENDING) return warming('detail still loading (cold start), retry in 2s');
     if (!it) return sendJson({ error: 'not found', hash }, 404);
 
     // 透传完整条目形状（含 i/t/s/d/m/files/tags/remarks），详情页字段由插件 fields 映射
