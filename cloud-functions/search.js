@@ -29,8 +29,8 @@ const DEFAULT_REF = 'master';
 // produced production 554s on cold start. Everything below is now bounded by a hard deadline so we
 // always answer before the edge gives up.
 const TIMEOUT_MS = 6000; // per single source attempt
-const LOAD_BUDGET_MS = 7000; // budget for cold-loading the search index
-const REQ_BUDGET_MS = 8000; // hard budget for a whole request; must stay under the origin timeout
+const LOAD_BUDGET_MS = 9000; // budget for cold-loading the search index
+const REQ_BUDGET_MS = 11000; // hard budget for a whole request; must stay under the origin timeout
 
 const GZ = typeof DecompressionStream !== 'undefined';
 const TD = new TextDecoder();
@@ -129,14 +129,16 @@ async function loadSearch(deadline) {
   if (SEARCH) return SEARCH;
   if (loading) return loading;
   loading = (async () => {
-    let meta = await fetchJsonSmart('index-slim/meta.z', 'index-slim/search.meta.json', deadline);
+    // meta and text are independent: fetch them in parallel instead of paying two sequential
+    // round trips to the CDN (measured cold start ~7s -> ~4s).
+    const [meta, textBytes] = await Promise.all([
+      fetchJsonSmart('index-slim/meta.z', 'index-slim/search.meta.json', deadline),
+      GZ ? fetchBytes('index-slim/text.z', deadline) : Promise.resolve(null),
+    ]);
     if (!meta) throw new Error('cannot fetch index-slim meta (data source failed)');
 
-    let text;
-    if (GZ) {
-      const b = await fetchBytes('index-slim/text.z', deadline);
-      if (b) text = isGz(b) ? await gunzipToString(b) : TD.decode(b);
-    }
+    let text = null;
+    if (textBytes) text = isGz(textBytes) ? await gunzipToString(textBytes) : TD.decode(textBytes);
     if (text == null) {
       // no DecompressionStream (or gz missing) -> stitch the raw UTF-8 chunks
       const n = Number(meta.textPlainChunks || 0);

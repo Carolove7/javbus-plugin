@@ -10,7 +10,7 @@ import { fetchItemFull, warming } from './search.js';
 
 // Must stay under the EdgeOne origin read timeout, otherwise the edge answers 524/554 and the
 // client gets an opaque "Request failed with status code 554" instead of a retryable response.
-const REQ_BUDGET_MS = 8000;
+const REQ_BUDGET_MS = 11000;
 const PENDING = Symbol('pending');
 
 function sendJson(obj, status = 200) {
